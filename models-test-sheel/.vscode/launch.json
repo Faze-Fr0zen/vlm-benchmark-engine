@@ -1,0 +1,94 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "lite: dry-run (short)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/models-test-sheel/run_matrix_lite.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${command:python.interpreterPath}",
+            "args": ["--phase", "short", "--dry-run", "--verbose"],
+            "justMyCode": false
+        },
+        {
+            "name": "lite: dry-run (all 63)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/models-test-sheel/run_matrix_lite.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${command:python.interpreterPath}",
+            "args": ["--phase", "all", "--dry-run"],
+            "justMyCode": false
+        },
+        {
+            "name": "lite: real short + warmup (GPU 监控)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/models-test-sheel/run_matrix_lite.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${command:python.interpreterPath}",
+            "args": [
+                "--phase", "short",
+                "--warmup",
+                "--base-url", "http://localhost:8000",
+                "--gpu-monitor-cmd", "nvidia",
+            ],
+            "justMyCode": false
+        },
+        {
+            "name": "lite: real all 63 (GPU 监控)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/models-test-sheel/run_matrix_lite.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${command:python.interpreterPath}",
+            "args": [
+                "--phase", "all",
+                "--warmup",
+                "--gpu-monitor-cmd", "nvidia",
+            ],
+            "justMyCode": false
+        },
+        {
+            "name": "lite: single combo (快速单步调试)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/models-test-sheel/run_matrix_lite.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${command:python.interpreterPath}",
+            "args": [
+                "--input-lens", "512",
+                "--output-lens", "256",
+                "--request-rates", "1", "16",
+                "--num-prompts", "3",
+                "--sleep-between", "1",
+                "--timeout", "300"
+            ],
+            "justMyCode": false
+        },
+        {
+            "name": "plot results",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/models-test-sheel/plot_results.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${command:python.interpreterPath}",
+            "args": ["--results-dir", "/vllm-workspace/results/vllm-bench-result"],
+            "justMyCode": false
+        },
+        {
+            "name": "attach (python -m debugpy --wait-for-client)",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": { "host": "localhost", "port": 5678 },
+            "justMyCode": false
+        }
+    ]
+}
