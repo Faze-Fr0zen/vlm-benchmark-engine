@@ -1,6 +1,5 @@
 # IDE
 .idea/
-.vscode/
 
 # 测试数据
 data/
