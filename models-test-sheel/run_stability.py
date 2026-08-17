@@ -334,6 +334,47 @@ class StabilityMonitor(threading.Thread):
 # 轻量施压器（流式请求 + 速率控制）
 # ---------------------------------------------------------------------------
 
+class PromptPool:
+    """预生成 prompt 池：后台线程持续生成，施压线程取用，生成与发送解耦。
+
+    避免高并发下 tokenizer.decode 长 prompt 阻塞窗口补充、造成 GPU 断流。
+    """
+
+    def __init__(self, gen, min_size=16, max_size=48, fillers=2):
+        self._gen = gen
+        self._min = min_size
+        self._max = max_size
+        self._pool = []
+        self._cv = threading.Condition()
+        self._stop = threading.Event()
+        for _ in range(fillers):
+            threading.Thread(target=self._fill, daemon=True).start()
+
+    def _fill(self):
+        rng = random.Random()
+        while not self._stop.is_set():
+            with self._cv:
+                if len(self._pool) >= self._max:
+                    self._cv.wait(0.2)
+                    continue
+            in_len = rng.randint(*SHORT_IN_RANGE) if rng.random() < SHORT_RATIO \
+                else rng.randint(*LONG_IN_RANGE)
+            try:
+                prompt = self._gen.gen(in_len)
+            except Exception:
+                time.sleep(0.1)
+                continue
+            with self._cv:
+                self._pool.append((in_len, prompt))
+                self._cv.notify()
+
+    def get(self):
+        with self._cv:
+            while not self._pool:
+                self._cv.wait(0.1)
+            return self._pool.pop()
+
+
 class LoadGenerator(threading.Thread):
     """并发窗口持续发请求，SSE 流式解析 TTFT/TPOT/E2E，统计吞吐与失败。"""
 
@@ -357,6 +398,7 @@ class LoadGenerator(threading.Thread):
         self._latencies = []             # (t, e2e_ms, ttft_ms, tpot_ms, out_tok)
         self._started_at = time.time()
         self._rate_window = []           # 滑动窗口: (t, ok)
+        self._pool = PromptPool(gen)
 
     # ---- 指标（线程安全）----
     def _snapshot(self):
@@ -385,10 +427,8 @@ class LoadGenerator(threading.Thread):
 
     # ---- 单个请求 ----
     def _send_one(self, rng):
-        in_len = rng.randint(*SHORT_IN_RANGE) if rng.random() < SHORT_RATIO \
-            else rng.randint(*LONG_IN_RANGE)
+        in_len, prompt = self._pool.get()
         out_len = rng.randint(*self.out_range)
-        prompt = self.gen.gen(in_len)
         payload = {
             "model": self.model,
             "prompt": prompt,
