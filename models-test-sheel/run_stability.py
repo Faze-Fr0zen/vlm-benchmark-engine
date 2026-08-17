@@ -315,15 +315,17 @@ class StabilityMonitor(threading.Thread):
                                         f"累计上升 {rise:.0f} MB")
             else:
                 findings["mem_leak"] = None
-        # waiting 堆积：全时段斜率
+        # waiting 堆积：全时段斜率（不足 10 分钟不做判定，短测过渡段斜率无意义）
         wq = self._series("num_requests_waiting")
         if len(wq) >= MIN_POINTS_FOR_TREND:
-            sl = self._slope(wq)
-            if sl is not None and sl >= WAIT_QUEUE_SLOPE_THRESH:
-                findings["queue_growth"] = (f"waiting 队列疑似无限堆积: "
-                                            f"增速 {sl:.2f} req/min")
-            else:
-                findings["queue_growth"] = None
+            span = wq[-1][0] - wq[0][0]
+            if span >= 600.0:
+                sl = self._slope(wq)
+                if sl is not None and sl >= WAIT_QUEUE_SLOPE_THRESH:
+                    findings["queue_growth"] = (f"waiting 队列疑似无限堆积: "
+                                                f"增速 {sl:.2f} req/min")
+                else:
+                    findings["queue_growth"] = None
         # 吞吐衰减：由施压器侧统计（见 LoadGenerator.finalize）
         return findings
 

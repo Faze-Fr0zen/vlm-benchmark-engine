@@ -67,7 +67,7 @@
 
    ```bash
    cd /vllm-workspace/scripts/models-test-sheel
-   python -m venv .venv && source .venv/bin/activate   # Linux（可选）
+   python3 -m venv .venv && source .venv/bin/activate   # Linux（可选）
    # 或 .venv\Scripts\activate                          # Windows
    ```
 
@@ -95,21 +95,21 @@ scp run_matrix.py run_matrix_lite.py sys_monitor.py plot_results.py \
 cd /vllm-workspace/scripts/models-test-sheel
 
 # 1. 先 dry-run 检查生成的命令（不校验路径、不创建目录）
-python run_matrix_lite.py --phase short --dry-run
+python3 run_matrix_lite.py --phase short --dry-run
 
 # 2. 小模型流程验证（单卡 4090，先跑短矩阵；模型/tokenizer 取脚本顶部变量）
-python run_matrix_lite.py --phase short --warmup
+python3 run_matrix_lite.py --phase short --warmup
 
 # 3. 需要 GPU 指标时加上探测命令（短名走注册表，或整串命令）
-python run_matrix_lite.py --phase short --warmup --gpu-monitor-cmd nvidia
-python run_matrix_lite.py --phase short --warmup \
+python3 run_matrix_lite.py --phase short --warmup --gpu-monitor-cmd nvidia
+python3 run_matrix_lite.py --phase short --warmup \
   --gpu-monitor-cmd "nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu --format=csv,noheader,nounits"
 
 # 4. 大模型全量矩阵（国产 GPU；切换模型时修改 run_matrix.py 顶部 MODEL 变量）
-python run_matrix.py --phase short --warmup --model zai-org/GLM-5.2-FP8
+python3 run_matrix.py --phase short --warmup --model zai-org/GLM-5.2-FP8
 
 # 5. 跑完画图（结果目录指向 vllm-bench-result）
-python plot_results.py --results-dir /vllm-workspace/results/vllm-bench-result
+python3 plot_results.py --results-dir /vllm-workspace/results/vllm-bench-result
 ```
 
 结果默认落在 `/vllm-workspace/results/vllm-bench-result/<run-id>/`
@@ -215,13 +215,13 @@ ECC 错误 / Silent Crash）。
 cd /vllm-workspace/scripts/models-test-sheel
 
 # 0. 真实短测（强烈建议先跑 1~5 分钟验证链路，再上长跑）
-python run_stability.py --duration 60 --rate 4 --max-concurrency 16
+python3 run_stability.py --duration 60 --rate 4 --max-concurrency 16
 
 # P3-1 饱和施压 1 小时（P2 极限并发点，如 64）
-python run_stability.py --duration 3600 --rate inf --max-concurrency 64
+python3 run_stability.py --duration 3600 --rate inf --max-concurrency 64
 
 # P3-2 24h 混合长跑（速率取 P2 极限吞吐的 70%~80%，如 3 req/s）
-python run_stability.py --duration 86400 --rate 3 --max-concurrency 64
+python3 run_stability.py --duration 86400 --rate 3 --max-concurrency 64
 ```
 
 ### 长度分布（A 方案：短/长各 50%）
@@ -262,7 +262,7 @@ python run_stability.py --duration 86400 --rate 3 --max-concurrency 64
 | `--tokenizer` | 顶部 `TOKENIZER` 变量（`/models/Qwen3-0.6B`） | tokenizer 本地绝对路径，离线模式必须；压测前做存在性校验 |
 | `--model-path` | 顶部 `MODEL_PATH` 变量 | 模型权重目录，仅做存在性校验 |
 | `--base-url` | `http://localhost:8000` | vLLM 服务地址（服务解耦部署时改为宿主机可达地址） |
-| `--vllm-cmd` | `vllm` | vllm 可执行命令（如 `--vllm-cmd "python -m vllm"`） |
+| `--vllm-cmd` | `vllm` | vllm 可执行命令（如 `--vllm-cmd "python3 -m vllm"`） |
 | `--phase` | `all` | `short` / `long` / `all` |
 | `--result-dir` | 顶部 `RESULTS_DIR` 变量（`/vllm-workspace/results/vllm-bench-result`） | 结果根目录（本地调试可用相对路径覆盖） |
 | `--run-id` | 按时间生成 | 本次运行标识（`run-YYYYMMDD-HHMMSS`） |
@@ -416,10 +416,10 @@ end_time, duration_s`。
 输出到 `figures/`；`--results-dir` 指向结果仓库）：
 
 ```bash
-python plot_results.py --results-dir /vllm-workspace/results/vllm-bench-result   # 最新 run 出图
-python plot_results.py --results-dir /vllm-workspace/results/vllm-bench-result --run run-20260811-103801
-python plot_results.py --results-dir /vllm-workspace/results/vllm-bench-result/run-20260811-103801   # 直接指到 run 目录
-python plot_results.py --results-dir /vllm-workspace/results/vllm-bench-result --gpu-series          # 额外输出每组时序图
+python3 plot_results.py --results-dir /vllm-workspace/results/vllm-bench-result   # 最新 run 出图
+python3 plot_results.py --results-dir /vllm-workspace/results/vllm-bench-result --run run-20260811-103801
+python3 plot_results.py --results-dir /vllm-workspace/results/vllm-bench-result/run-20260811-103801   # 直接指到 run 目录
+python3 plot_results.py --results-dir /vllm-workspace/results/vllm-bench-result --gpu-series          # 额外输出每组时序图
 ```
 
 | 参数 | 默认值 | 说明 |
@@ -470,8 +470,8 @@ P3 数据格式与 P2 不同（无 summary.csv），用独立脚本，一个 P3 
 时钟 + 心跳），ERROR 红线事件画红色竖线，报告摘要写入图顶：
 
 ```bash
-python plot_stability.py --results-dir run-20260817-030000            # 单个 P3 run
-python plot_stability.py --results-dir /vllm-workspace/results --out-dir figures   # 多个 run 一起
+python3 plot_stability.py --results-dir run-20260817-030000            # 单个 P3 run
+python3 plot_stability.py --results-dir /vllm-workspace/results --out-dir figures   # 多个 run 一起
 ```
 
 输出：`<run_id>_stability.png` + `stability_summary.csv`（每个 run 一行，
@@ -491,7 +491,7 @@ python plot_stability.py --results-dir /vllm-workspace/results --out-dir figures
   ```bash
   cd /vllm-workspace/scripts/models-test-sheel
   tmux new -s bench
-  python run_matrix.py --phase all --warmup 2>&1 | tee bench.log
+  python3 run_matrix.py --phase all --warmup 2>&1 | tee bench.log
   # 断开 tmux 继续跑；断网/中断后用 --resume 续跑
   ```
 
@@ -533,7 +533,7 @@ python plot_stability.py --results-dir /vllm-workspace/results --out-dir figures
 
 ```bash
 cd /vllm-workspace/scripts/models-test-sheel && source .venv/bin/activate
-python -m debugpy --listen 5678 --wait-for-client \
+python3 -m debugpy --listen 5678 --wait-for-client \
     run_matrix_lite.py --phase short --warmup
 ```
 
