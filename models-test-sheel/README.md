@@ -434,14 +434,24 @@ python plot_results.py --results-dir /vllm-workspace/results/vllm-bench-result -
 
 | 文件 | 内容 |
 |---|---|
-| `throughput_latency_short.png` / `_long.png` | 吞吐-延迟权衡图，标出膝点（推荐配置） |
-| `concurrency_saturation_short.png` / `_long.png` | 速率-吞吐 + P99 TTFT，标出排队临界区 |
-| `long_context_prefill_long.png` | 长文本性能衰减图（输入长度 vs P99 TTFT），含失败/OOM 标记 |
+| `throughput_latency_short.png` / `_long.png` | 吞吐-延迟权衡图，TTFT/TPOT 子图均标出膝点（推荐配置） |
+| `concurrency_saturation_short.png` / `_long.png` | 速率-吞吐 + P99 TTFT，标出排队临界 rate 竖线 |
+| `long_context_prefill_long.png` | 长文本性能衰减图（输入长度 vs P99 TTFT + Max Concurrent Requests） |
 | `long_context_gpu_mem_long.png` | 长文本显存压力图（输入长度 vs 峰值显存占用） |
 | `gpu_series/*.png` | 每组测试的监控时序图：GPU 利用率 / 显存 / CPU+系统内存 |
 | `summary_metrics.csv` | 每组合并后的指标表格（含峰值 GPU 指标与泄漏告警） |
 
 说明：
+
+- **排队临界 rate 的判定**（饱和图竖线）：优先取 P99 TTFT 首次 ≥ 最低速率
+  基线 2 倍的速率（排队拉高延迟）；若 TTFT 始终不翻倍，则回退取 output
+  throughput 首次达到峰值 95% 的速率（吞吐饱和点）。两者都不满足则不画线。
+  例：0.6B 实测 4K 输入组临界 rate=4、1K 输入组 16~32。
+- **Max Concurrent Requests** 取自 result.json 的 `max_concurrent_requests`
+  （vLLM 调度器观测到的并发运行峰值，直接反映 KV Cache 容量压力）；随输入
+  长度增长而下降即 KV Cache 压力上升的表现。
+- **Prefill 耗时**以 P99 TTFT 近似（vLLM 0.26 的 result.json 无独立
+  prefill 字段）。
 
 - 无 GPU 数据的 run（未配置 `--gpu-monitor-cmd`）时序图自动退化为纯
   CPU/系统内存面板，其余图不受影响，`summary_metrics.csv` 的 GPU 列为空。

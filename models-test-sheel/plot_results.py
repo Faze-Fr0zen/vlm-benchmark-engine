@@ -2,11 +2,16 @@
 
 扫描 run_matrix.py 输出的结果目录，解析各测试目录下的 result.json
 （缺省回退到 summary.csv），按《模型测试方案书》第四节规范生成图表：
-  1. 吞吐-延迟权衡图（Throughput vs Latency，标出膝点）
-  2. 并发饱和度图（Request Rate vs Throughput + P99 TTFT，标出排队临界点）
-  3. 长文本性能衰减图（Input Length vs Prefill(TTFT)，含失败/OOM 标记）
+  1. 吞吐-延迟权衡图（Throughput vs Latency，TTFT/TPOT 均标出膝点）
+  2. 并发饱和度图（Request Rate vs Throughput + P99 TTFT，标出排队临界 rate）
+  3. 长文本性能衰减图（Input Length vs Prefill(TTFT) + Max Concurrent Requests，
+     含失败/OOM 标记）
   4. 长文本 GPU 显存压力图（Input Length vs 峰值显存占用）
  5. gpu_series/ 下可选输出每组测试的 GPU 指标时序图
+
+数据源说明：Max Concurrent Requests 取自 vLLM bench result.json 的
+`max_concurrent_requests`（调度器观测到的并发运行峰值，直接反映 KV
+Cache 容量压力）；Prefill 耗时以 P99 TTFT 近似（无独立 prefill 字段时）。
 
 用法示例::
 
@@ -133,6 +138,7 @@ def extract_metrics(result):
 
     m["output_throughput"] = num("output_throughput")
     m["request_throughput"] = num("total_request_throughput", "request_throughput")
+    m["max_concurrent_requests"] = num("max_concurrent_requests")
     m["mean_ttft_ms"] = num("mean_ttft_ms")
     m["p99_ttft_ms"] = pct(["percentiles_ttft_ms", "ttft_percentiles",
                             "latency_percentiles"], 0.99) or num("p99_ttft_ms")
@@ -214,8 +220,8 @@ def parse_test_dir(path, run_id, index):
         record["leak_warning"] = row.get("leak_warning") or ""
         if not record["metrics"]:
             record["metrics"] = {k: _safe_float(row.get(k)) for k in (
-                "output_throughput", "request_throughput", "mean_ttft_ms",
-                "p99_ttft_ms", "mean_tpot_ms", "p99_tpot_ms",
+                "output_throughput", "request_throughput", "max_concurrent_requests",
+                "mean_ttft_ms", "p99_ttft_ms", "mean_tpot_ms", "p99_tpot_ms",
                 "mean_e2e_ms", "num_requests", "num_failed", "total_tokens")}
     if not record["metrics"] and not record["status"]:
         return None
@@ -305,28 +311,30 @@ def plot_knee(ax, pts_x, pts_y):
                 color="green")
 
 
-def queue_onset_point(pairs):
-    finite = [p for p in pairs if not math.isinf(p[0])]
-    if not finite or not finite[0][1]:
-        return None
-    base = finite[0][1]
-    if base <= 0:
-        return None
-    return_onset = None
-    for rate, val in finite[1:]:
-        if val is not None and val >= base * 2:
-            return_onset = rate
-            break
-    if return_onset is None or math.isinf(return_onset):
-        for rate, val in pairs:
-            if math.isinf(rate) and val is not None and val >= base * 2:
-                return_onset = rate
-    if return_onset is None:
-        return None
-    for rate, val in pairs:
-        if rate == return_onset:
-            return rate
-    return return_onset
+def queue_onset_point(pairs, thr_pairs=None):
+    """排队临界 rate：TTFT 突变点或吞吐饱和点，取二者较小者。
+
+    - TTFT 突变：P99 TTFT 首次 ≥ 最低速率基线的 2 倍（排队拉高延迟）
+    - 吞吐饱和：output throughput 首次达到峰值 95%（此后加 rate 不增吞吐）
+    无满足条件时返回 None（不画临界线）。
+    """
+    # 1) TTFT 突变
+    finite = [p for p in pairs if not math.isinf(p[0]) and p[1] is not None]
+    if finite and finite[0][1] > 0:
+        base = finite[0][1]
+        for rate, val in finite[1:]:
+            if val >= base * 2:
+                return rate
+    # 2) 吞吐饱和点
+    if thr_pairs:
+        fthr = [p for p in thr_pairs
+                if not math.isinf(p[0]) and p[1] is not None and p[1] > 0]
+        if len(fthr) >= 2:
+            peak = max(v for _, v in fthr)
+            for rate, val in fthr:
+                if val >= peak * 0.95:
+                    return rate
+    return None
 
 
 def clean_points(series, key):
@@ -386,8 +394,7 @@ def chart_throughput_latency(records, args, tag):
                 for r, t, v in zip(xs, thrs, vals):
                     ax.annotate(rate_label(r), (t, v), fontsize=6.5,
                                 xytext=(4, 4), textcoords="offset points", alpha=0.75)
-                if metric == "p99_ttft_ms":
-                    plot_knee(ax, list(thrs), list(vals))
+                plot_knee(ax, list(thrs), list(vals))
             if plotted:
                 ax.set_xscale("log")
                 ax.set_yscale("log")
@@ -446,10 +453,11 @@ def chart_saturation(records, args, tag):
                 ax2.plot(ttft_x, ttft_y, marker="s", ls="--", color="#d62728",
                          label="P99 TTFT")
 
-            onset = queue_onset_point(ttft_pairs)
+            onset = queue_onset_point(ttft_pairs, thr_pairs)
             if onset is not None and onset in pos:
                 ax.axvline(pos[onset], color="gray", ls=":", lw=1.5)
-                ax.text(pos[onset], 0.06, "排队临界", rotation=90, fontsize=8,
+                ax.text(pos[onset], 0.06, f"排队临界 rate={rate_label(onset)}",
+                        rotation=90, fontsize=8,
                         color="gray", transform=ax.get_xaxis_transform())
 
             xticks, xtlabels = [], []
@@ -521,34 +529,27 @@ def chart_long_ttft(records, args):
         ax.set_ylabel("P99 TTFT (ms, log)")
 
         axf = axes[row][1]
-        fail_records = [(r["input_len"], r["rate"],
-                         (r["metrics"].get("num_failed") or 0))
-                        for r in records if r["output_len"] == o_len]
-        fail_records = [(i_len, rate, n) for i_len, rate, n in fail_records if n > 0]
-        if fail_records:
-            inputs = sorted({r[0] for r in fail_records})
-            width = 0.8 / max(len(rates), 1)
-            for r_idx, rate in enumerate(rates):
-                counts = [(i_len, n) for i_len, r, n in fail_records if r == rate]
-                if counts:
-                    xs = [inputs.index(i) + r_idx * width for i, n in counts]
-                    ys = [n for i, n in counts]
-                    axf.bar(xs, ys, width=width, color=colors[r_idx % len(colors)],
-                            label=f"rate={rate_label(rate)}")
-                    for x, y in zip(xs, ys):
-                        axf.annotate(str(int(y)), (x, y), xytext=(0, 3), fontsize=7,
-                                     ha="center", textcoords="offset points")
-            axf.set_xticks(range(len(inputs)))
-            axf.set_xticklabels([f"{i // 1024}K" for i in inputs])
-        axf.set_ylabel("失败请求数")
-        axf.set_xlabel("Input Length")
-        axf.grid(True, axis="y", alpha=0.3)
-        axf.set_title(f"Out={o_len // 1024}K  失败/超时请求数")
+        axf.set_xscale("log")
+        for r_idx, rate in enumerate(rates):
+            ser = sorted(combos.get((o_len, rate), []), key=lambda x: x["input_len"])
+            pts = [(r["input_len"], r["metrics"].get("max_concurrent_requests"))
+                   for r in ser
+                   if r["metrics"].get("max_concurrent_requests") is not None]
+            if not pts:
+                continue
+            xs, ys = zip(*pts)
+            color = colors[r_idx % len(colors)]
+            axf.plot(xs, ys, marker="o", markersize=5, color=color,
+                     label=f"rate={rate_label(rate)}")
+        axf.set_ylabel("Max Concurrent Requests")
+        axf.set_xlabel("Input Length (log)")
+        axf.grid(True, which="both", alpha=0.3)
+        axf.set_title(f"Out={o_len // 1024}K  Max Concurrent Requests（KV Cache 容量压力）")
 
     handles, labels = axes[0][0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", ncol=len(rates), fontsize=9,
                frameon=False, bbox_to_anchor=(0.5, 0.955))
-    fig.suptitle("长文本性能衰减图（Input Length vs P99 TTFT / 失败数）", y=0.995)
+    fig.suptitle("长文本性能衰减图（Input Length vs Prefill(TTFT) / Max Concurrent Requests）", y=0.995)
     fig.tight_layout(rect=[0, 0, 1, 0.93])
     save(fig, os.path.join(args.out_dir, "long_context_prefill_long.png"), args)
 
@@ -686,7 +687,8 @@ def write_metrics_csv(records, args):
     os.makedirs(args.out_dir, exist_ok=True)
     fields = ["run_id", "phase", "input_len", "output_len", "rate",
               "output_throughput", "p99_ttft_ms", "mean_ttft_ms",
-              "p99_tpot_ms", "mean_tpot_ms", "num_failed", "status",
+              "p99_tpot_ms", "mean_tpot_ms", "max_concurrent_requests",
+              "num_failed", "status",
               "leak_warning",
               "peak_gpu_util_pct", "peak_gpu_mem_util_pct", "peak_gpu_mem_pct"]
     with open(path, "w", newline="", encoding="utf-8") as fh:
@@ -702,6 +704,7 @@ def write_metrics_csv(records, args):
                 "mean_ttft_ms": r["metrics"].get("mean_ttft_ms"),
                 "p99_tpot_ms": r["metrics"].get("p99_tpot_ms"),
                 "mean_tpot_ms": r["metrics"].get("mean_tpot_ms"),
+                "max_concurrent_requests": r["metrics"].get("max_concurrent_requests"),
                 "num_failed": r["metrics"].get("num_failed"),
                 "status": r["status"],
                 "leak_warning": r.get("leak_warning") or "",
