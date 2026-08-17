@@ -78,7 +78,8 @@ def fetch_vllm_metrics(base_url):
     for line in text.splitlines():
         if not line.startswith("vllm:"):
             continue
-        m = re.match(r"vllm:(\w+)\s+([\d.e+-]+)", line)
+        # vLLM 0.26+ 指标带 label: vllm:num_requests_waiting{engine="0",model_name="..."} 0.0
+        m = re.match(r"vllm:(\w+)(?:\{[^}]*\})?\s+([\d.e+-]+)", line)
         if m and m.group(1) in METRIC_NAMES:
             out[m.group(1)] = float(m.group(2))
     return out
@@ -154,11 +155,11 @@ class StabilityMonitor(threading.Thread):
         if gpu_probe:
             self._clock_probe = CustomProbe(
                 "nvidia-smi --query-gpu=clocks.sm,clocks.max.sm "
-                "--format=csv,noheader,nounits")
+                "--format=csv,noheader,nounits", raw=True)
             self._ecc_probe = CustomProbe(
                 "nvidia-smi --query-gpu=ecc.errors.uncorrected.aggregate.total,"
                 "ecc.errors.corrected.aggregate.total "
-                "--format=csv,noheader,nounits")
+                "--format=csv,noheader,nounits", raw=True)
 
     def stop(self):
         self._stop_evt.set()

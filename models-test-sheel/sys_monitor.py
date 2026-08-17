@@ -110,9 +110,10 @@ class CpuMemSampler:
 
 
 class CustomProbe:
-    def __init__(self, cmd, regex=None):
+    def __init__(self, cmd, regex=None, raw=False):
         self.cmd = cmd.split()
         self.regex = re.compile(regex) if regex else None
+        self.raw = raw  # True: 返回原始数字列表（列数不定），由调用方自行解包
 
     def sample(self):
         try:
@@ -139,7 +140,11 @@ class CustomProbe:
         else:
             for line in text.strip().splitlines():
                 nums = [_first_number(x) for x in line.split(",")]
-                if len(nums) >= 3:
+                if not nums or nums[0] is None:
+                    continue
+                if self.raw:
+                    rows.append(nums)
+                elif len(nums) >= 3:
                     rows.append((nums[0], None, nums[1], nums[2],
                                  nums[3] if len(nums) > 3 else None,
                                  nums[4] if len(nums) > 4 else None))

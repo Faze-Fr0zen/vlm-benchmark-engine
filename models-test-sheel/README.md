@@ -18,6 +18,7 @@
 | `run_matrix_lite.py` | 轻量矩阵执行器（小模型/流程验证版，63 组），逻辑与监控完全复用 `run_matrix.py` |
 | `sys_monitor.py` | 共享系统监控模块（无第三方依赖），含 `GPU_PROBES` 厂商注册表，被上面两个脚本 import |
 | `plot_results.py` | 结果解析与画图（依赖 matplotlib） |
+| `plot_stability.py` | Phase 3 稳定性时序图（P3 专用，依赖 matplotlib） |
 | `run_stability.py` | Phase 3 长跑稳定性施压器（自定义轻量客户端 + 红线监控，零第三方依赖） |
 | `requirements.txt` | 画图依赖（运行压测本体不需要） |
 
@@ -462,8 +463,21 @@ python plot_results.py --results-dir /vllm-workspace/results/vllm-bench-result -
 - 图例与标题已做布局分层（`bbox_to_anchor` + `tight_layout`），多子图
   时顶部不再重叠。
 
-## 实用技巧
+### Phase 3 结果画图（plot_stability.py）
 
+P3 数据格式与 P2 不同（无 summary.csv），用独立脚本，一个 P3 run 一张
+四面板时序图（GPU 利用率/温度/功耗、显存、waiting/running 队列、SM
+时钟 + 心跳），ERROR 红线事件画红色竖线，报告摘要写入图顶：
+
+```bash
+python plot_stability.py --results-dir run-20260817-030000            # 单个 P3 run
+python plot_stability.py --results-dir /vllm-workspace/results --out-dir figures   # 多个 run 一起
+```
+
+输出：`<run_id>_stability.png` + `stability_summary.csv`（每个 run 一行，
+含趋势判定结果、ERROR/WARN 数、GPU 峰值/温度/队列峰值）。
+
+## 实用技巧
 - **先用 dry-run 再跑**：`--dry-run --verbose` 打印全部命令，确认
   `vllm bench serve` 参数与本地 vLLM 版本吻合后再执行（dry-run 跳过
   路径校验，且不创建任何目录）。
