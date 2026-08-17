@@ -490,6 +490,10 @@ class LoadGenerator(threading.Thread):
         if ok < 40 or not lats:
             return {"throughput_decay": None,
                     "latency": None, "summary": (ok, fail, to, len(lats))}
+        # 运行不足 10 分钟不做趋势判定（短测样本内长短请求分布不均，纯属噪声）
+        if (lats[-1][0] - lats[0][0]) < 600.0:
+            return {"throughput_decay": None,
+                    "latency": None, "summary": (ok, fail, to, len(lats))}
         half = len(lats) // 2
         first_half = [e for _, e, *_ in lats[:half]]
         second_half = [e for _, e, *_ in lats[half:]]
