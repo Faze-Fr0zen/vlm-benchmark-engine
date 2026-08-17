@@ -35,7 +35,7 @@
 │       ├── plot_results.py
 │       └── README.md
 ├── results/
-│   └── vllm-bench-result/    # 压测结果统一存放（独立 git 仓库，可直接 git add/push）
+│   └── vllm-bench-result/    # 压测结果统一存放（自行归档，git 无关）
 └── .vscode/
     └── launch.json           # VSCode 调试配置（workspace 根打开 /vllm-workspace）
 ```
@@ -80,8 +80,8 @@
 
    - 模型权重与 tokenizer 在 `/models/Qwen3-0.6B`（脚本顶部 `MODEL_PATH` /
      `TOKENIZER` 变量，路径不存在会立即报错）
-   - `/vllm-workspace/results/vllm-bench-result` 已独立初始化为 git 仓库并
-     配置 SSH 远端（用于压测结果自动推送；不是 git 仓库时自动跳过推送）
+   - `/vllm-workspace/results/vllm-bench-result` 为压测结果统一存放目录
+     （自动创建；数据自行下载归档）
 
 ## 快速开始
 
@@ -124,7 +124,7 @@ MODEL = "qwen3-0.6b"                 # 压测模型名（--model 默认，必须
                                      #   vllm serve 的 --served-model-name 一致）
 TOKENIZER = "/models/Qwen3-0.6B"     # tokenizer 本地绝对路径（离线模式必须）
 MODEL_PATH = "/models/Qwen3-0.6B"    # 模型权重目录（仅做存在性校验）
-RESULTS_DIR = "/vllm-workspace/results/vllm-bench-result"  # 压测结果统一存放目录（独立 git 仓库）
+RESULTS_DIR = "/vllm-workspace/results/vllm-bench-result"  # 压测结果统一存放目录
 ```
 
 压测命令执行前会**校验 tokenizer 与模型权重目录存在**，路径不存在立即报错
@@ -147,44 +147,6 @@ RESULTS_DIR = "/vllm-workspace/results/vllm-bench-result"  # 压测结果统一�
 > 退出码为 0 但**不生成 result.json**，导致 summary 指标全空、无法画图。
 > 脚本已自动处理；手动跑 bench 时注意补上。
 
-## 结果自动推送（Git）
-
-`/vllm-workspace/results/vllm-bench-result` 已独立初始化为 git 仓库并配置
-SSH 远端。每组测试**成功（退出码 0）且生成 result.json** 后自动执行：
-
-```bash
-git add <run-id>/<phase>/in<input>_out<output>_rate<rate>/result.json
-git commit -m "bench: auto push <模型名>_<输入>_<输出>_rate<速率> [<run-id>]"
-git push origin <当前分支>
-```
-
-实现说明（与常见做法有两处刻意差异）：
-
-- **不执行 `cd`**：压测命令通过绝对路径 `--result-dir` 指定结果目录，git
-  操作统一用 `git -C <results-dir>` 定位，无需切换工作目录，脚本在任意
-  位置运行都不受影响
-- **不使用 `git add *.json`**：结果组织在 `run-id/<phase>/<组合>/` 子目录
-  下，顶层 `*.json` 匹配不到；改为精确 add 单组 `result.json`，避免误提交
-  其他 run / 其他组的文件
-
-行为约定：
-
-- **分支动态获取**：用 `git branch --show-current` 取当前分支，不硬编码
-  master/main，避免分支名不符导致推送失败
-- **推送前同步**：先 `git pull --rebase origin <分支>`，防止远端有新提交时
-  push 被拒绝
-- **空提交保护**：`git add` 后检测无暂存变更（如压测中断未生成新数据）
-  则跳过 commit 和 push
-- **幂等可追溯**：commit message 含模型/输入/输出/速率及 run-id，
-  相同参数重复压测不会被 Git 误判为空提交
-- **失败不阻塞**：任何 git 操作失败（无远端、无权限、网络异常等）只打印
-  `[warn]` 警告，压测主流程照常进行
-- 结果目录不是 git 仓库时（如本地调试）自动跳过推送
-
-> **重建容器后记得重配 git 身份**：`git config` 是容器内的，不随镜像
-> 持久化。报 `Author identity unknown` 时在容器内执行：
-> `git config --global user.name 'xxx' && git config --global user.email 'xxx@xx'`
-
 ## 服务器部署注意事项
 
 1. **单卡 4090 可满足 lite 矩阵**（Qwen3-0.6B）：权重仅 ~1.3GB（FP16），
@@ -196,11 +158,10 @@ git push origin <当前分支>
    启动失败
 3. **速率 32 × 并发 64 时 P99 TTFT 升高是预期排队现象**：这正是压测要
    观测的排队临界；想先验证流程可只跑 `--request-rates 4 8 16`
-4. **results 仓库**：`/vllm-workspace/results/vllm-bench-result` 需已
-   `git init`、配置 SSH 远端（`git remote add origin <git@...>`）且
-   SSH key 已加载；缺任一项仅打印 `[warn]`，不影响压测
+4. **results 目录**：`/vllm-workspace/results/vllm-bench-result` 为结果
+   统一存放目录，脚本自动创建
 5. **dry-run 是最安全的预检**：只打印命令，不校验路径、不创建任何
-   目录/文件、不推送
+   目录/文件
 
 ## 测试矩阵
 
@@ -302,8 +263,8 @@ python run_stability.py --duration 86400 --rate 3 --max-concurrency 64
 | `--base-url` | `http://localhost:8000` | vLLM 服务地址（服务解耦部署时改为宿主机可达地址） |
 | `--vllm-cmd` | `vllm` | vllm 可执行命令（如 `--vllm-cmd "python -m vllm"`） |
 | `--phase` | `all` | `short` / `long` / `all` |
-| `--result-dir` | 顶部 `RESULTS_DIR` 变量（`/vllm-workspace/results/vllm-bench-result`） | 结果根目录（服务器 git 仓库；本地调试可用相对路径覆盖） |
-| `--run-id` | 按时间生成 | 本次运行标识（`run-YYYYMMDD-HHMMSS`，同时写入 git 提交信息） |
+| `--result-dir` | 顶部 `RESULTS_DIR` 变量（`/vllm-workspace/results/vllm-bench-result`） | 结果根目录（本地调试可用相对路径覆盖） |
+| `--run-id` | 按时间生成 | 本次运行标识（`run-YYYYMMDD-HHMMSS`） |
 | `--timeout` | 7200 | 单组测试超时秒数（超时记为 TIMEOUT 并继续） |
 | `--sleep-between` | 5.0 | 相邻测试间隔秒数 |
 | `--warmup` | 关 | 矩阵前先跑一组小规模预热（1024 in/out，5 请求，与短矩阵首组对齐） |
@@ -439,8 +400,8 @@ util,mem_used,mem_total[,power,temp]
     └── ...
 ```
 
-每次压测提交到 git 仓库的只有各组的 `result.json`（`run_id/phase/组合/`
-路径下的单文件），`summary.csv` / 监控文件 / 日志 / 元数据不入库。
+各组产物（`result.json` / `summary.csv` / 监控文件 / 日志 / 元数据）
+全部落在结果目录下，自行下载归档（不经过 git）。
 
 `summary.csv` 列（部分）：`run_id, phase, input_len, output_len,
 request_rate, num_prompts, status, error, output_throughput,
@@ -531,7 +492,7 @@ python plot_results.py --results-dir /vllm-workspace/results/vllm-bench-result -
 | `lite: dry-run (all 63)` | 查看全部 63 组命令 |
 | `lite: real short + warmup (GPU 监控)` | 正式跑 short 45 组 + 预热，GPU 采样走注册表短名 `nvidia` |
 | `lite: real all 63 (GPU 监控)` | 全矩阵 |
-| `lite: single combo` | 单组 × 3 请求，快速单步调试监控/推送逻辑 |
+| `lite: single combo` | 单组 × 3 请求，快速单步调试监控逻辑 |
 | `plot results` | 调试结果画图（指向 vllm-bench-result） |
 | `attach` | 附加到已运行的压测进程 |
 
@@ -564,12 +525,9 @@ python -m debugpy --listen 5678 --wait-for-client \
 | `错误：tokenizer 路径不存在` | 检查脚本顶部 `TOKENIZER` / `MODEL_PATH` 变量与 `/models/` 下实际目录是否一致 |
 | `POST /v1/completions 404` 且 GPU 空转 | **模型名不匹配**：脚本 `--model` 必须等于服务端 `--served-model-name`（如 `qwen3-0.6b`），对照 `vllm serve` 的启动参数修正 `MODEL` 变量 |
 | 测试全 OK 但 result.json 缺失、summary 指标全空 | vLLM 0.26+ 需 `--save-result`（脚本已自动追加）；手动跑 bench 时补 `--save-result --result-file xxx.json` |
-| `[warn] git push 失败` / `Author identity unknown` | 容器重建后 git 身份丢失，容器内重配 `git config --global user.name/email`；再检查结果仓库 SSH 远端配置 |
 | `FileNotFoundError .../scripts/run_matrix_lite.py` | launch.json 的 `program` 与目录布局不一致（脚本现在在 `scripts/models-test-sheel/`），换容器后记得同步 `.vscode/launch.json` |
 | 显存曲线平线、GPU 利用率有波动 | 正常：vLLM 启动时预分配显存（gpu-memory-utilization），显存看"分配"、利用率看"忙闲" |
 | 低速率组（rate=1/4/8）GPU 采样几乎全 0 | 正常：0.6B 单请求几十 ms，10s 采样间隔大概率采到空闲；看 `inf`/高 rate 组验证 GPU 满载 |
-| `[warn] git push 失败` | 检查 `/vllm-workspace/results/vllm-bench-result` 的 SSH 远端配置与网络；不影响压测结果 |
-| `[warn] 未生成结果文件，跳过 git 推送` | 该组压测失败或无 result.json，属预期行为 |
 | `无法探测 vLLM bench serve 参数` | 按常见参数默认值继续，实际运行前会重新探测；确认 vllm 在 PATH 中 |
 | GPU 探测命令失败警告 | 命令在 shell 中手动执行确认输出；注意 `split()` 拆分与管道问题；短名需先在 `GPU_PROBES` 注册 |
 | 某组 OOM | 看看该组 gpu_stats.csv 与 monitor_events.log 的显存告警；长文本显存压力图和 summary 的 `num_failed` 定位 |

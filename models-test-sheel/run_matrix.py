@@ -14,10 +14,8 @@ gpu_stats.csv，monitor_events.log 记录 OOM 告警与日志错误扫描，
 模型/tokenizer 路径：脚本顶部 MODEL / TOKENIZER / MODEL_PATH 变量统一
 管理（切换模型只改变量）；压测前校验 tokenizer 与模型权重目录存在性。
 
-结果存储与推送：结果默认写入 /vllm-workspace/results（RESULTS_DIR，
-独立 git 仓库）；每组测试成功（退出码 0）且生成 result.json 后自动
-commit + push（分支动态获取、push 前 pull --rebase、无变更跳过、
-失败仅打印警告不阻塞）。
+结果存储：结果默认写入 /vllm-workspace/results（RESULTS_DIR，可改任意
+目录，git 无关，数据自行归档）。
 
 运行小模型快速验证时请使用 run_matrix_lite.py（矩阵/参数不同，监控相同）。
 
@@ -47,7 +45,7 @@ from sys_monitor import SystemMonitor, make_probe
 MODEL = "qwen3-0.6b"               # 压测模型名（--model 默认，必须与 vLLM serve 的 --served-model-name 一致，切换模型只改这里）
 TOKENIZER = "/models/Qwen3-0.6B"     # tokenizer 本地绝对路径（离线模式必须）
 MODEL_PATH = "/models/Qwen3-0.6B"    # 模型权重目录（仅做存在性校验）
-RESULTS_DIR = "/vllm-workspace/results/vllm-bench-result"  # 压测结果统一存放目录（独立 git 仓库）
+RESULTS_DIR = "/vllm-workspace/results/vllm-bench-result"  # 压测结果统一存放目录
 DEFAULT_BASE_URL = "http://localhost:8000"
 
 SHORT_INPUTS = [1024, 4096, 8192]
@@ -297,58 +295,6 @@ def validate_paths(args):
                      f"--model-path 参数")
 
 
-def git_push_results(args, run_id, case, test_dir):
-    """压测成功后将单组 result.json 提交并推送（独立 results git 仓库）。
-
-    - 仓库不存在或非 git 目录时静默跳过
-    - 分支名用 git branch --show-current 动态获取，不硬编码
-    - push 前先 pull --rebase 防远端新提交导致拒绝
-    - 无变更（git add 后无 staged diff）跳过 commit/push，避免空提交
-    - commit message 含模型/输入/输出/速率及 run_id，保证幂等可追溯
-    - 任何 git 失败只打印警告，不阻塞压测主流程
-    """
-    repo = args.result_dir
-    if not os.path.isdir(os.path.join(repo, ".git")):
-        return
-    rel = os.path.join(run_id, case["phase"], case_dir_name(case),
-                       "result.json").replace(os.sep, "/")
-    rel_abs = os.path.join(repo, *rel.split("/"))
-    if not os.path.exists(rel_abs):
-        print(f"[warn] 未生成结果文件 {rel}，跳过 git 推送")
-        return
-
-    model = str(args.model).replace("/", "_")
-    msg = (f"bench: auto push {model}_{case['input_len']}_{case['output_len']}"
-           f"_rate{case['request_rate']} [{run_id}]")
-
-    def git(*argv):
-        return subprocess.run(["git", "-C", repo] + list(argv),
-                              capture_output=True, text=True, timeout=120)
-
-    try:
-        branch = (git("branch", "--show-current").stdout or "").strip()
-        if not branch:
-            return
-        git("pull", "--rebase", "origin", branch)
-        add = git("add", rel)
-        if add.returncode != 0:
-            print(f"[warn] git add {rel} 失败，跳过推送: {add.stderr.strip()}")
-            return
-        if git("diff", "--cached", "--quiet").returncode == 0:
-            return
-        commit = git("commit", "-m", msg)
-        if commit.returncode != 0:
-            print(f"[warn] git commit 失败，跳过推送: {commit.stderr.strip()}")
-            return
-        push = git("push", "origin", branch)
-        if push.returncode != 0:
-            print(f"[warn] git push 失败（不影响压测）: {push.stderr.strip()}")
-        else:
-            print(f"[git] 已推送 {rel} -> {branch} ({msg})")
-    except Exception as exc:
-        print(f"[warn] git 推送异常（不影响压测）: {exc}")
-
-
 def run_one(case, args, flags, run_id, run_dir, index, total):
     test_dir = os.path.join(run_dir, case["phase"], case_dir_name(case))
     if case["phase"] == "long":
@@ -452,8 +398,6 @@ def run_one(case, args, flags, run_id, run_dir, index, total):
         writer = csv.DictWriter(fh, fieldnames=SUMMARY_FIELDS)
         writer.writerow(row)
         fh.flush()
-    if status == "OK" and os.path.exists(result_path):
-        git_push_results(args, run_id, case, test_dir)
     return row
 
 
@@ -541,9 +485,6 @@ def main():
     print(f"监控输出: 每组测试目录下的 sys_stats.csv / monitor_events.log"
           f"{' / gpu_stats.csv' if args.gpu_probe is not None else ''}；"
           f"泄漏检测: 系统内存≥50MB/min、显存≥100MB/min")
-    if os.path.isdir(os.path.join(args.result_dir, ".git")):
-        print(f"[info] {args.result_dir} 为 git 仓库，每组测试成功后自动 "
-              f"commit + push（失败不影响压测）")
 
     run_id = args.run_id or dt.datetime.now().strftime("run-%Y%m%d-%H%M%S")
     run_started = dt.datetime.now()
