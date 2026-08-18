@@ -645,7 +645,7 @@ def parse_args():
     p.add_argument("--duration", type=int, default=7200,
                    help="运行时长（秒），如 7200（1h）/ 86400（24h）")
     p.add_argument("--rate", type=float, default=float("inf"),
-                   help="请求速率 req/s（P3-1 用 inf 压满；P3-2 用极限吞吐的 70%~80%）")
+                   help="请求速率 req/s（P3-1 用 inf 压满；P3-2 用极限吞吐的 70%%~80%%）")
     p.add_argument("--max-concurrency", type=int, default=64,
                    help="并发窗口上限（P3-1 饱和施压的关键参数）")
     p.add_argument("--short-input", nargs=2, type=int, default=list(SHORT_IN_RANGE),

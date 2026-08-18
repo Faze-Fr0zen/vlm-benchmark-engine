@@ -396,7 +396,7 @@ def main():
     p.add_argument("--sys-mem-warn-mb", type=float, default=2048,
                    help="系统可用内存告警阈值（MiB）")
     p.add_argument("--gpu-mem-warn-pct", type=float, default=95.0,
-                   help="显存利用率告警阈值（%）")
+                   help="显存利用率告警阈值（百分比）")
     p.add_argument("--duration", type=float, default=0.0,
                    help="采样时长秒数，0=无限（Ctrl+C 停止）")
     p.add_argument("--clocks-ecc", action="store_true",
