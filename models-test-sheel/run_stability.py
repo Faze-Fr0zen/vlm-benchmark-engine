@@ -95,32 +95,31 @@ def fetch_heartbeat(base_url):
 
 
 # ---------------------------------------------------------------------------
-# 请求生成（随机中英文文本，长度按字符/token 比例折算，不依赖 tokenizer）
+# 请求生成（纯 ASCII 随机文本，长度按字符/token 折算，不依赖 tokenizer）
 # ---------------------------------------------------------------------------
 
 class PromptGenerator:
     """生成约 target_len token 的 prompt 文本。
 
-    避免在容器内加载慢速 tokenizer（decode 长 id 列表会卡死施压线程），
-    改为随机中英文混合文本：中文约 1 字/token、英文约 4 字符/token，
-    混合后按 0.5 token/字符 折算目标字符数。
+    字符集仅含小写字母与空格：小写字母串约 3.3 字符/token（Qwen3 类
+    BPE 词表），空格 1 token，混合后长度偏差 ±20% 且不会超过
+    max-model-len。之前用随机中文文本，tokenizer 对生僻字会膨胀
+    1.3~1.6 倍，导致长 prompt 超限返回 HTTP 400。
     """
 
-    _CJK = "".join(chr(c) for c in range(0x4E00, 0x9FFF))
-    _LATIN = "abcdefghijklmnopqrstuvwxyz0123456789 ,.;:!?"
+    _LATIN = "abcdefghijklmnopqrstuvwxyz "
 
     def __init__(self, rng=None):
         self.rng = rng or random.Random()
 
     def gen(self, target_len):
-        n_chars = max(16, int(target_len * 2))
+        n_chars = max(16, int(target_len * 3.0))
         text = []
         append = text.append
         choice = self.rng.choice
-        cjk = self._CJK
         latin = self._LATIN
         for _ in range(n_chars):
-            append(choice(cjk) if choice((True, False)) else choice(latin))
+            append(choice(latin))
         return "".join(text)
 
 
@@ -557,6 +556,16 @@ class LoadGenerator(threading.Thread):
             if out_tokens > 1 and ttft is not None:
                 tpot = (e2e - ttft) / (out_tokens - 1) if out_tokens > 1 else 0.0
             self._report_one(t0, ttft, tpot, e2e, out_tokens, True)
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", errors="replace")[:300]
+            except Exception:
+                pass
+            self._report_one(t0, None, None,
+                             (time.time() - t0) * 1000.0, 0, False)
+            if self._n_fail % 50 == 1:
+                print(f"[warn] 请求失败 #{self._n_fail}: HTTP {exc.code}: {detail}")
         except Exception as exc:
             self._report_one(t0, None, None,
                              (time.time() - t0) * 1000.0, 0, False)
