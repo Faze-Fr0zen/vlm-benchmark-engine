@@ -39,6 +39,8 @@ ERROR_PATTERNS = [
 
 GPU_STATS_HEADER = ["timestamp", "gpu", "util_pct", "mem_util_pct",
                     "mem_used_mib", "mem_total_mib", "power_w", "temp_c"]
+EXTRA_GPU_HEADERS = ["clocks_sm_mhz", "clocks_max_mhz",
+                     "ecc_uncorrected", "ecc_corrected"]
 SYS_STATS_HEADER = ["timestamp", "cpu_util_pct", "sys_mem_used_mib",
                     "sys_mem_total_mib", "sys_mem_avail_mib",
                     "swap_used_mib", "swap_total_mib"]
@@ -212,7 +214,8 @@ def detect_leak(series, label, min_slope_mb_min):
 class SystemMonitor(threading.Thread):
     def __init__(self, test_dir, interval=10.0, gpu_ids=None,
                  gpu_probe=None, probe_name=None,
-                 sys_mem_warn_mb=2048, gpu_mem_warn_pct=95.0):
+                 sys_mem_warn_mb=2048, gpu_mem_warn_pct=95.0,
+                 extra_probes=None):
         super().__init__(daemon=True, name="sys-monitor")
         self.test_dir = test_dir
         self.interval = interval
@@ -221,6 +224,12 @@ class SystemMonitor(threading.Thread):
         self.probe_name = probe_name
         self.sys_mem_warn_mb = sys_mem_warn_mb
         self.gpu_mem_warn_pct = gpu_mem_warn_pct
+        # 附加探针: [(header_names_tuple, probe)]，值追加在 gpu_stats.csv 行尾
+        self.extra_probes = list(extra_probes or [])
+        self._gpu_header = (GPU_STATS_HEADER +
+                            [n for names, _ in self.extra_probes
+                             for n in (names if isinstance(names, tuple)
+                                       else (names,))])
         self._stop_evt = threading.Event()
         self._cpu = CpuMemSampler()
         self._gpu_idx = 0
@@ -274,7 +283,7 @@ class SystemMonitor(threading.Thread):
                       newline="", encoding="utf-8") as fh:
                 writer = csv.writer(fh)
                 if self._sampled == 1:
-                    writer.writerow(GPU_STATS_HEADER)
+                    writer.writerow(self._gpu_header)
                 for row in rows:
                     if self._gpu_allowed is not None:
                         gpu_id = self._gpu_idx
@@ -284,9 +293,15 @@ class SystemMonitor(threading.Thread):
                     else:
                         gpu_id = len(seen)
                     seen.add(gpu_id)
+                    extra_vals = []
+                    for _, probe in self.extra_probes:
+                        erows = probe.sample()
+                        extra_vals += ["" if v is None else f"{v:.1f}"
+                                       for v in (erows[0] if erows else [])]
                     writer.writerow([f"{ts:.1f}", gpu_id] + ["" if v is None
                                                              else f"{v:.1f}"
-                                                             for v in row])
+                                                             for v in row] +
+                                    extra_vals)
                     if row[2] is not None and row[3]:
                         self._gpu_mem_series.setdefault(gpu_id, []).append(
                             (ts, row[2]))
@@ -355,3 +370,85 @@ class SystemMonitor(threading.Thread):
                 pass
             self._log_fh = None
         return "; ".join(warnings) or ""
+
+
+def main():
+    """独立运行模式（测试与服务分离时，服务端旁路采样）。
+
+    用法::
+
+        python sys_monitor.py --out-dir /vllm-workspace/monitor \\
+            --interval 5 --gpu-monitor-cmd nvidia
+
+    采样写 <out-dir>/gpu_stats.csv 与 sys_stats.csv，事件写
+    monitor_events.log。Ctrl+C 或 --duration 秒后停止；停止时打印
+    泄漏检测结果。启动时打印本机当前时间，供两端对时参考。
+    """
+    import argparse
+    p = argparse.ArgumentParser(
+        description="GPU/系统监控独立运行模式（服务端旁路落盘）")
+    p.add_argument("--out-dir", required=True, help="监控数据输出目录")
+    p.add_argument("--interval", type=float, default=5.0, help="采样间隔秒数")
+    p.add_argument("--gpu-monitor-cmd", default=None,
+                   help="GPU 探测（注册表短名或完整命令；不传则只采 CPU/内存）")
+    p.add_argument("--gpu-regex", default=None, help="GPU 探测正则（命名组）")
+    p.add_argument("--gpu-ids", default=None, help="限制 GPU 编号，如 '0,1'")
+    p.add_argument("--sys-mem-warn-mb", type=float, default=2048,
+                   help="系统可用内存告警阈值（MiB）")
+    p.add_argument("--gpu-mem-warn-pct", type=float, default=95.0,
+                   help="显存利用率告警阈值（%）")
+    p.add_argument("--duration", type=float, default=0.0,
+                   help="采样时长秒数，0=无限（Ctrl+C 停止）")
+    p.add_argument("--clocks-ecc", action="store_true",
+                   help="同时采样 SM 时钟与 ECC 计数（nvidia-smi，供 P3 降频/"
+                        "ECC 红线判定），追加到 gpu_stats.csv 行尾")
+    args = p.parse_args()
+
+    os.makedirs(args.out_dir, exist_ok=True)
+    probe = make_probe(args.gpu_monitor_cmd, args.gpu_regex)
+    extra_probes = []
+    if args.clocks_ecc:
+        extra_probes = [
+            (("clocks_sm_mhz", "clocks_max_mhz"),
+             CustomProbe("nvidia-smi --query-gpu=clocks.sm,clocks.max.sm "
+                         "--format=csv,noheader,nounits", raw=True)),
+            (("ecc_uncorrected", "ecc_corrected"),
+             CustomProbe("nvidia-smi --query-gpu=ecc.errors.uncorrected."
+                         "aggregate.total,ecc.errors.corrected.aggregate.total "
+                         "--format=csv,noheader,nounits", raw=True)),
+        ]
+    monitor = SystemMonitor(args.out_dir, interval=args.interval,
+                            gpu_ids=args.gpu_ids, gpu_probe=probe,
+                            sys_mem_warn_mb=args.sys_mem_warn_mb,
+                            gpu_mem_warn_pct=args.gpu_mem_warn_pct,
+                            extra_probes=extra_probes)
+    monitor.start()
+    print(f"[monitor] 采样目录: {args.out_dir}  interval={args.interval}s"
+          f"{'  GPU: ' + args.gpu_monitor_cmd if probe else ''}"
+          f"{'  + clocks/ECC' if extra_probes else ''}")
+    print(f"[monitor] 本机当前时间: {time.strftime('%Y-%m-%d %H:%M:%S')} "
+          f"(测试端启动前请目视对齐)")
+    try:
+        if args.duration > 0:
+            monitor.join(args.duration)
+            print(f"[monitor] 采样 {args.duration}s 结束")
+        else:
+            print("[monitor] 无限采样中，Ctrl+C 停止")
+            while monitor.is_alive():
+                monitor.join(1.0)
+    except KeyboardInterrupt:
+        print("\n[monitor] 收到停止信号")
+    finally:
+        monitor.stop()
+        monitor.join(timeout=5)
+        warnings = monitor.finish()
+        if warnings:
+            print(f"[monitor] {warnings}")
+        else:
+            print("[monitor] 无泄漏告警")
+        print(f"[monitor] 数据: {os.path.join(args.out_dir, 'gpu_stats.csv')}"
+              f" / sys_stats.csv / monitor_events.log")
+
+
+if __name__ == "__main__":
+    main()

@@ -5,11 +5,10 @@
   - 2.2 长文本:    输入 16K/32K/64K/128K x 输出 1K/4K x 速率 1/4/8/16
 每组测试强制追加 --ignore-eos 与 --no-enable-prefix-caching。
 
-监控（sys_monitor.py）默认采集 CPU/系统内存；需要 GPU 指标时用
---gpu-monitor-cmd 显式指定探测命令（nvidia-smi/npu-smi/任意工具均可），
-不探测、不依赖任何 GPU 厂商工具。实时写 sys_stats.csv 与可选的
-gpu_stats.csv，monitor_events.log 记录 OOM 告警与日志错误扫描，
-测试结束做内存泄漏回归检测并回填 summary 的 leak_warning。
+测试与服务分离：本脚本只做压测（发请求），GPU/系统监控由服务端独立
+运行 sys_monitor.py --standalone 旁路采样；测试结束后把服务端的
+gpu_stats.csv 拉回，用 --gpu-csv 传入，按每组测试的起止时间窗做窗口
+聚合（util 均值/峰值、显存峰值、显存泄漏检测），写入 summary 对应列。
 
 模型/tokenizer 路径：脚本顶部 MODEL / TOKENIZER / MODEL_PATH 变量统一
 管理（切换模型只改变量）；压测前校验 tokenizer 与模型权重目录存在性。
@@ -17,7 +16,7 @@ gpu_stats.csv，monitor_events.log 记录 OOM 告警与日志错误扫描，
 结果存储：结果默认写入 /vllm-workspace/results（RESULTS_DIR，可改任意
 目录，git 无关，数据自行归档）。
 
-运行小模型快速验证时请使用 run_matrix_lite.py（矩阵/参数不同，监控相同）。
+运行小模型快速验证时请使用 run_matrix_lite.py（矩阵/参数不同）。
 
 用法示例::
 
@@ -25,6 +24,7 @@ gpu_stats.csv，monitor_events.log 记录 OOM 告警与日志错误扫描，
     python run_matrix.py --phase short --warmup   # 仅 2.1 短/中文本矩阵
     python run_matrix.py --dry-run                # 打印命令不执行
     python run_matrix.py --resume                 # 跳过已有 result.json 的测试
+    python run_matrix.py --gpu-csv gpu_stats.csv  # 并入服务端旁路采样的 GPU 数据
 
 依赖仅为 Python 3.9+ 标准库（CPU 采样优先 psutil，缺省回退 /proc）。
 """
@@ -39,8 +39,6 @@ import shutil
 import subprocess
 import sys
 import time
-
-from sys_monitor import SystemMonitor, make_probe
 
 MODEL = "qwen3-0.6b"               # 压测模型名（--model 默认，必须与 vLLM serve 的 --served-model-name 一致，切换模型只改这里）
 TOKENIZER = "/models/Qwen3-0.6B"     # tokenizer 本地绝对路径（离线模式必须）
@@ -66,7 +64,8 @@ SUMMARY_FIELDS = [
     "total_tokens", "input_tokens", "output_tokens",
     "mean_ttft_ms", "p99_ttft_ms", "mean_tpot_ms", "p99_tpot_ms",
     "mean_e2e_ms", "p99_e2e_ms", "num_requests", "num_failed",
-    "leak_warning", "start_time", "end_time", "duration_s",
+    "gpu_util_mean", "gpu_util_max", "gpu_mem_pct_max", "gpu_leak_warning",
+    "start_time", "end_time", "duration_s",
 ]
 
 _NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
@@ -115,20 +114,9 @@ def parse_args():
     p.add_argument("--resume", action="store_true", help="跳过已有 result.json 的测试")
     p.add_argument("--dry-run", action="store_true", help="只打印命令不执行")
     p.add_argument("--verbose", action="store_true", help="打印完整命令")
-    p.add_argument("--no-gpu-monitor", action="store_true",
-                   help="禁用 GPU 采样（仅当传了 --gpu-monitor-cmd 时才有意义，"
-                        "CPU/内存监控始终开启）")
-    p.add_argument("--gpu-interval", type=float, default=10.0, help="监控采样间隔秒数")
-    p.add_argument("--gpu-ids", default=None, help="限制监控的 GPU 编号，如 '0,1'（缺省采集所有）")
-    p.add_argument("--gpu-monitor-cmd", default=None,
-                   help="自定义 GPU 探测命令，输出每行逗号分隔数字列 "
-                        "util,mem_used,mem_total[,power,temp]（可与 --gpu-regex 搭配）")
-    p.add_argument("--gpu-regex", default=None,
-                   help="自定义 GPU 探测正则，命名组 util/mem_used/mem_total/power/temp")
-    p.add_argument("--sys-mem-warn-mb", type=int, default=2048,
-                   help="系统可用内存告警阈值（MiB），低于则报 OOM 风险")
-    p.add_argument("--gpu-mem-warn-pct", type=float, default=95.0,
-                   help="GPU 显存利用率告警阈值（%）")
+    p.add_argument("--gpu-csv", default=None,
+                   help="服务端旁路采样的 gpu_stats.csv 路径（sys_monitor.py "
+                        "--standalone 输出），按每组测试起止时间窗聚合 GPU 指标")
     return p.parse_args()
 
 
@@ -161,7 +149,6 @@ def probe_vllm_flags(vllm_cmd_list):
     """探测 vLLM bench serve 支持的参数（新版本 --help 只出分组概览，
     需用 --help=all 才能拿到全量 flag）。"""
     help_text = ""
-    ok = False
     for probe_args in (["bench", "serve", "--help=all"],
                        ["bench", "serve", "--help"]):
         try:
@@ -285,6 +272,78 @@ def _first_number(field):
     return float(m.group()) if m else None
 
 
+def _linreg(xs, ys):
+    n = len(xs)
+    if n < 2:
+        return None
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    sxx = sum((x - mx) ** 2 for x in xs)
+    if sxx == 0:
+        return None
+    sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    slope = sxy / sxx
+    intercept = my - slope * mx
+    ss_tot = sum((y - my) ** 2 for y in ys)
+    ss_res = sum((y - (slope * x + intercept)) ** 2 for x, y in zip(xs, ys))
+    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
+    return slope, r2
+
+
+def _gpu_leak_detect(series):
+    """对窗口内显存序列做线性回归泄漏检测（阈值与 sys_monitor 一致）。"""
+    pts = [(s[0], s[1]) for s in series if s[1] is not None]
+    if len(pts) < 8:
+        return None
+    t0 = pts[0][0]
+    xs = [(t - t0) / 60.0 for t, _ in pts]
+    ys = [v for _, v in pts]
+    fit = _linreg(xs, ys)
+    if fit is None:
+        return None
+    slope, r2 = fit
+    rise = ys[-1] - ys[0]
+    if slope >= 100.0 and r2 >= 0.5 and rise >= max(ys[0] * 0.02, 64):
+        return (f"GPU显存疑似泄漏: 增速 {slope:.0f} MB/min, "
+                f"累计上升 {rise:.0f} MB")
+    return None
+
+
+def aggregate_gpu_window(csv_path, start_ts, end_ts):
+    """从服务端旁路采样的 gpu_stats.csv 中按 [start_ts, end_ts] 窗口聚合。
+
+    返回: gpu_util_mean / gpu_util_max / gpu_mem_pct_max / gpu_leak_warning。
+    时间戳为 epoch 秒；CSV 列: timestamp,gpu,util_pct,mem_util_pct,
+    mem_used_mib,mem_total_mib,power_w,temp_c。"""
+    if not csv_path or not os.path.exists(csv_path):
+        return None, None, None, None
+    start = dt.datetime.fromisoformat(start_ts).timestamp()
+    end = dt.datetime.fromisoformat(end_ts).timestamp()
+    utils, mem_pcts = [], []
+    mem_series = []
+    with open(csv_path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            parts = line.strip().split(",")
+            if len(parts) < 5 or parts[0] == "timestamp":
+                continue
+            try:
+                ts = float(parts[0])
+                util = float(parts[2])
+                mem_pct = float(parts[3])
+                mem_used = float(parts[4])
+            except (ValueError, IndexError):
+                continue
+            if ts < start or ts > end:
+                continue
+            utils.append(util)
+            mem_pcts.append(mem_pct)
+            mem_series.append((ts, mem_used))
+    if not utils:
+        return None, None, None, None
+    return (sum(utils) / len(utils), max(utils), max(mem_pcts),
+            _gpu_leak_detect(mem_series))
+
+
 def validate_paths(args):
     """压测前校验 tokenizer / 模型权重路径存在性，缺失立即报错退出。"""
     for label, path in (("tokenizer", args.tokenizer),
@@ -316,55 +375,48 @@ def run_one(case, args, flags, run_id, run_dir, index, total):
         return
     os.makedirs(test_dir, exist_ok=True)
 
-    probe = args.gpu_probe if not args.no_gpu_monitor else None
-    monitor = SystemMonitor(test_dir, interval=args.gpu_interval,
-                            gpu_ids=args.gpu_ids, gpu_probe=probe,
-                            probe_name=args.gpu_probe_name,
-                            sys_mem_warn_mb=args.sys_mem_warn_mb,
-                            gpu_mem_warn_pct=args.gpu_mem_warn_pct)
-    monitor.start()
-
     start_time = dt.datetime.now()
     started = time.time()
     log_path = os.path.join(test_dir, "test.log")
     meta = {"run_id": run_id, "command": cmd, "start_time": start_time.isoformat()}
-    try:
-        with open(log_path, "w", encoding="utf-8") as log_fh:
-            proc = subprocess.Popen(cmd, stdout=log_fh, stderr=subprocess.STDOUT)
-            try:
-                proc.wait(timeout=args.timeout)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-                status = "TIMEOUT"
-            else:
-                status = "OK" if proc.returncode == 0 else f"FAILED(rc={proc.returncode})"
-        duration = time.time() - started
-
-        if status != "OK":
-            tail = ""
-            with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
-                tail = "\n".join(fh.readlines()[-200:])
-            if re.search(r"(?i)out of memory|\bcuda out of memory\b|\boom\b", tail):
-                status = "OOM"
-            print(f"    {status}，日志尾部：")
-            print("    " + "\n    ".join(tail[-1200:].splitlines()[-8:]))
-            error = tail[-1200:].strip()
+    with open(log_path, "w", encoding="utf-8") as log_fh:
+        proc = subprocess.Popen(cmd, stdout=log_fh, stderr=subprocess.STDOUT)
+        try:
+            proc.wait(timeout=args.timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            status = "TIMEOUT"
         else:
-            error = ""
-    finally:
-        monitor.stop()
-        monitor.join(timeout=5)
+            status = "OK" if proc.returncode == 0 else f"FAILED(rc={proc.returncode})"
+    duration = time.time() - started
 
+    if status != "OK":
+        tail = ""
+        with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
+            tail = "\n".join(fh.readlines()[-200:])
+        if re.search(r"(?i)out of memory|\bcuda out of memory\b|\boom\b", tail):
+            status = "OOM"
+        print(f"    {status}，日志尾部：")
+        print("    " + "\n    ".join(tail[-1200:].splitlines()[-8:]))
+        error = tail[-1200:].strip()
+    else:
+        error = ""
     end_time = dt.datetime.now()
-    leak_warning = monitor.finish()
+
+    gpu_util_mean, gpu_util_max, gpu_mem_pct_max, gpu_leak = aggregate_gpu_window(
+        args.gpu_csv, start_time.isoformat(), end_time.isoformat())
+    leak_warning = gpu_leak or ""
 
     row = {
         "run_id": run_id, "phase": case["phase"],
         "input_len": case["input_len"], "output_len": case["output_len"],
         "request_rate": str(case["request_rate"]), "num_prompts": num_prompts,
         "status": status, "error": error,
-        "leak_warning": leak_warning,
+        "gpu_util_mean": f"{gpu_util_mean:.1f}" if gpu_util_mean is not None else "",
+        "gpu_util_max": f"{gpu_util_max:.1f}" if gpu_util_max is not None else "",
+        "gpu_mem_pct_max": f"{gpu_mem_pct_max:.1f}" if gpu_mem_pct_max is not None else "",
+        "gpu_leak_warning": leak_warning,
         "start_time": start_time.isoformat(), "end_time": end_time.isoformat(),
         "duration_s": f"{duration:.1f}",
     }
@@ -471,20 +523,11 @@ def main():
     print(f"矩阵规模：{total} 组测试（short={sum(1 for c in cases if c['phase']=='short')}，"
           f"long={sum(1 for c in cases if c['phase']=='long')}）")
 
-    args.gpu_probe = None
-    args.gpu_probe_name = None
-    if args.gpu_monitor_cmd:
-        args.gpu_probe = make_probe(args.gpu_monitor_cmd, args.gpu_regex)
-        if args.gpu_probe is not None:
-            args.gpu_probe_name = f"custom({args.gpu_monitor_cmd})"
-            print(f"GPU 采样使用: {args.gpu_monitor_cmd}（间隔 {args.gpu_interval}s）")
-    if args.gpu_probe is None:
-        print("[info] 未配置 --gpu-monitor-cmd，仅监控 CPU/系统内存，"
-              "不采样 GPU（需要 GPU 指标时用 --gpu-monitor-cmd 指定，"
-              "输出格式: 每行逗号分隔数字列 util,mem_used,mem_total[,power,temp]）")
-    print(f"监控输出: 每组测试目录下的 sys_stats.csv / monitor_events.log"
-          f"{' / gpu_stats.csv' if args.gpu_probe is not None else ''}；"
-          f"泄漏检测: 系统内存≥50MB/min、显存≥100MB/min")
+    if args.gpu_csv and not os.path.exists(args.gpu_csv):
+        print(f"[warn] --gpu-csv 指定的文件不存在: {args.gpu_csv}，"
+              f"本组 GPU 指标列将留空（不中断压测）")
+    elif args.gpu_csv:
+        print(f"[info] GPU 数据将按测试时间窗聚合自: {args.gpu_csv}")
 
     run_id = args.run_id or dt.datetime.now().strftime("run-p2-%Y%m%d-%H%M%S")
     run_started = dt.datetime.now()
@@ -492,9 +535,7 @@ def main():
     if not args.dry_run:
         os.makedirs(run_dir, exist_ok=True)
         with open(os.path.join(run_dir, "run_config.json"), "w", encoding="utf-8") as fh:
-            config = {k: v for k, v in vars(args).items()
-                      if not k.startswith("gpu_probe")}
-            json.dump(config, fh, ensure_ascii=False, indent=2)
+            json.dump(vars(args), fh, ensure_ascii=False, indent=2)
         with open(os.path.join(run_dir, "summary.csv"), "w", newline="", encoding="utf-8") as fh:
             csv.DictWriter(fh, fieldnames=SUMMARY_FIELDS).writeheader()
 

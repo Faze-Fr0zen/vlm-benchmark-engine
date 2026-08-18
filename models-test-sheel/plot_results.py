@@ -77,6 +77,10 @@ def parse_args():
                    help="多个 run 时选择其一（缺省取最新/第一个）")
     p.add_argument("--gpu-series", action="store_true",
                    help="额外输出每组测试的 GPU 指标时序图")
+    p.add_argument("--gpu-csv", default=None,
+                   help="服务端旁路采样的全局 gpu_stats.csv（sys_monitor.py "
+                        "--standalone 输出），按每组测试时间窗切片（测试与"
+                        "服务分离时使用）")
     p.add_argument("--dpi", type=int, default=150)
     p.add_argument("--font", default=None, help="指定中文字体名")
     return p.parse_args()
@@ -152,9 +156,37 @@ def extract_metrics(result):
     return m
 
 
-def load_gpu_stats(test_dir):
+def load_gpu_stats(test_dir, gpu_csv=None, start_ts=None, end_ts=None):
+    """读组 GPU 统计。优先组目录 gpu_stats.csv（旧数据）；否则从服务端
+    全局 gpu_csv 按 [start_ts, end_ts] 窗口切片聚合（测试与服务分离）。"""
     path = os.path.join(test_dir, "gpu_stats.csv")
     stat = None
+    if not os.path.exists(path) and gpu_csv and os.path.exists(gpu_csv):
+        path = gpu_csv
+        rows = None
+        if start_ts and end_ts:
+            rows = slice_gpu_rows(gpu_csv, start_ts, end_ts)
+        if rows is None:
+            return None
+        util_vals, mem_util_vals, mem_ratios = [], [], []
+        for row in rows:
+            util = _first_number(row.get("util_pct") or "")
+            mem_util = _first_number(row.get("mem_util_pct") or "")
+            used = _first_number(row.get("mem_used_mib") or "")
+            total = _first_number(row.get("mem_total_mib") or "")
+            if util is not None:
+                util_vals.append(util)
+            if mem_util is not None:
+                mem_util_vals.append(mem_util)
+            if used is not None and total:
+                mem_ratios.append(used / total)
+        if util_vals or mem_util_vals or mem_ratios:
+            stat = {
+                "peak_util": max(util_vals) if util_vals else None,
+                "peak_mem_util": max(mem_util_vals) if mem_util_vals else None,
+                "peak_mem_pct": max(mem_ratios) * 100 if mem_ratios else None,
+            }
+        return stat
     if not os.path.exists(path):
         return None
     util_vals, mem_util_vals, mem_ratios = [], [], []
@@ -179,12 +211,32 @@ def load_gpu_stats(test_dir):
     return stat
 
 
+def slice_gpu_rows(gpu_csv, start_ts, end_ts):
+    """从全局 gpu_stats.csv 取 [start_ts, end_ts] 窗口内的行（列表）。"""
+    import datetime as _dt
+    try:
+        start = _dt.datetime.fromisoformat(start_ts).timestamp()
+        end = _dt.datetime.fromisoformat(end_ts).timestamp()
+    except (TypeError, ValueError):
+        return None
+    rows = []
+    with open(gpu_csv, "r", encoding="utf-8") as fh:
+        for row in csv.DictReader(fh):
+            try:
+                ts = float(row["timestamp"])
+            except (KeyError, ValueError):
+                continue
+            if start <= ts <= end:
+                rows.append(row)
+    return rows or None
+
+
 def _first_number(field):
     m = _NUM_RE.search(field)
     return float(m.group()) if m else None
 
 
-def parse_test_dir(path, run_id, index):
+def parse_test_dir(path, run_id, index, gpu_csv=None):
     name = os.path.basename(path)
     m = TEST_DIR_RE.fullmatch(name)
     if not m:
@@ -198,11 +250,20 @@ def parse_test_dir(path, run_id, index):
     else:
         phase = "long" if input_len >= RATE_THRESHOLD_LONG else "short"
 
+    row = index.get((phase, str(input_len), str(output_len), str(rate_str))) \
+        if index else None
+    gpu = None
+    if row and gpu_csv and os.path.exists(gpu_csv):
+        gpu = load_gpu_stats(path, gpu_csv,
+                             row.get("start_time"), row.get("end_time"))
+    if gpu is None:
+        gpu = load_gpu_stats(path)
+
     record = {
         "run_id": run_id, "phase": phase, "input_len": input_len,
         "output_len": output_len, "rate": to_rate(rate_str),
         "test_dir": path, "status": "", "error": "", "leak_warning": "",
-        "metrics": {}, "gpu": load_gpu_stats(path),
+        "metrics": {}, "gpu": gpu,
     }
 
     res_path = os.path.join(path, "result.json")
@@ -213,7 +274,6 @@ def parse_test_dir(path, run_id, index):
         except (json.JSONDecodeError, OSError) as exc:
             print(f"[warn] 解析失败 {res_path}: {exc}")
 
-    row = index.get((phase, str(input_len), str(output_len), str(rate_str)))
     if row:
         record["status"] = row.get("status") or ""
         record["error"] = row.get("error") or ""
@@ -237,7 +297,7 @@ def _safe_float(value):
         return None
 
 
-def load_records(run_dir):
+def load_records(run_dir, gpu_csv=None):
     index = csv_index(run_dir)
     records = []
     run_id = os.path.basename(run_dir)
@@ -248,7 +308,7 @@ def load_records(run_dir):
         for name in sorted(os.listdir(phase_dir)):
             path = os.path.join(phase_dir, name)
             if os.path.isdir(path):
-                rec = parse_test_dir(path, run_id, index)
+                rec = parse_test_dir(path, run_id, index, gpu_csv=gpu_csv)
                 if rec:
                     records.append(rec)
     return records
@@ -596,18 +656,40 @@ def chart_long_gpu(records, args):
 def chart_gpu_series(records, args):
     for rec in records:
         gpu_csv = os.path.join(rec["test_dir"], "gpu_stats.csv")
+        start_ts = end_ts = None
+        if not os.path.exists(gpu_csv) and args.gpu_csv:
+            gpu_csv = args.gpu_csv
+            index = csv_index(os.path.dirname(rec["test_dir"]))
+            phase = rec["phase"]
+            row = index.get((phase, str(rec["input_len"]), str(rec["output_len"]),
+                             str(rec["rate"])))
+            if row:
+                start_ts, end_ts = row.get("start_time"), row.get("end_time")
         if not os.path.exists(gpu_csv):
             continue
         t, util, mem_util, used, total = [], [], [], [], []
         with open(gpu_csv, "r", encoding="utf-8") as fh:
             for row in csv.DictReader(fh):
+                try:
+                    ts = float(row["timestamp"])
+                except (KeyError, ValueError):
+                    continue
+                if start_ts and end_ts:
+                    import datetime as _dt
+                    try:
+                        s = _dt.datetime.fromisoformat(start_ts).timestamp()
+                        e = _dt.datetime.fromisoformat(end_ts).timestamp()
+                    except (TypeError, ValueError):
+                        s = e = None
+                    if s is not None and not (s <= ts <= e):
+                        continue
                 u = _first_number(row.get("util_pct") or "")
                 mu = _first_number(row.get("mem_util_pct") or "")
                 mem = _first_number(row.get("mem_used_mib") or "")
                 tot = _first_number(row.get("mem_total_mib") or "")
                 if u is None and mem is None:
                     continue
-                t.append(float(row["timestamp"]))
+                t.append(ts)
                 util.append(u if u is not None else float("nan"))
                 mem_util.append(mu if mu is not None else float("nan"))
                 used.append(mem if mem is not None else float("nan"))
@@ -734,7 +816,7 @@ def main():
         if len(runs) > 1:
             print(f"[info] 检测到多个 run，默认使用: {run_dir}（--run 可切换）")
 
-    records = load_records(run_dir)
+    records = load_records(run_dir, gpu_csv=args.gpu_csv)
     if not records:
         sys.exit("错误：run 目录下未解析到任何测试结果")
     short_records, long_records = split_phases(records)

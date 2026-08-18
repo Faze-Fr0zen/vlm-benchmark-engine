@@ -102,7 +102,8 @@
 | `--resume` | 关 | 跳过已有 `result.json` 的组 |
 | `--dry-run` | 关 | 只打印命令不执行 |
 | `--verbose` | 关 | 打印完整命令 |
-| `--gpu-monitor-cmd` | 无 | GPU 探测命令（见第 3 节） |
+| `--gpu-csv` | 无 | 服务端旁路采样的 `gpu_stats.csv`（`sys_monitor.py --standalone` 输出），按每组测试起止时间窗聚合 GPU 指标（测试与服务分离时使用，见第 3 节） |
+| `--gpu-monitor-cmd` | 无 | GPU 探测命令（旧版内联采样，见第 3 节） |
 | `--gpu-ids` | 全部 | 限制监控的 GPU，如 `0,1` |
 | `--gpu-interval` | 10.0 | 监控采样间隔（秒） |
 | `--no-gpu-monitor` | 关 | 禁用 GPU 采样（CPU/内存监控始终开启） |
@@ -166,7 +167,7 @@ python run_matrix_lite.py --run-id run-lite-01
 | `--out-range` | `512 2048` | 输出长度范围 [min max] |
 | `--metrics-interval` | 15.0 | 监控采样间隔（秒） |
 | `--temp-warn` | 85.0 | 温度告警阈值（℃） |
-| `--gpu-monitor-cmd` | nvidia | GPU 探测（注册表短名或完整命令；不传则不采样） |
+| `--gpu-csv` | 无 | 服务端旁路采样的 `gpu_stats.csv` 路径；事后 merge 进 `stability_series.csv` 并做红线判定（降频/ECC/显存泄漏，见第 3 节） |
 | `--result-dir` | 顶部 `RESULTS_DIR` | 结果根目录 |
 | `--run-id` | 按时间（`run-p3-1-*` / `run-p3-2-*`，按速率自动区分） | 运行标识 |
 | `--dry-run` | 关 | 只演示请求生成，不真正压测 |
@@ -191,7 +192,9 @@ python run_stability.py --duration 3600 --short-input 256 512 --long-input 2048 
 
 ### 关键信息
 
-被压测脚本 import 的共享模块（不单独运行）：
+两种使用方式：
+
+**A. 内联采样（旧模式，默认）**：被压测脚本 import，与测试同进程采样：
 
 - **零第三方依赖**：只解析子进程 stdout 的浮点列，不依赖厂商工具库
 - **GPU_PROBES 注册表**：内置各厂商探测短名（如 `nvidia`、`mthreads`、
@@ -200,9 +203,26 @@ python run_stability.py --duration 3600 --short-input 256 512 --long-input 2048 
 - **采样落盘**：`sys_stats.csv`（CPU/内存/负载）+ `gpu_stats.csv`
   （util,mem_util,mem_used,mem_total,power,temp）
 - **事件日志** `monitor_events.log`：按 `时间 级别 来源 内容` 追加
-  告警与红线事件（ERROR/WARN），供第 4 节画图与报告脚本统计
+  告警与红线事件（ERROR/WARN），供画图与报告脚本统计
 - **告警与泄漏检测**：OOM（显存 ≥ 95%）、内存告警（剩余 < 2048 MiB）、
   显存泄漏（增速 ≥ 100 MB/min）、系统内存泄漏（增速 ≥ 50 MB/min）
+
+**B. 旁路独立采样（`--standalone`，推荐用于测试与服务分离）**：
+在服务端单独运行，测试端脚本（run_matrix/run_stability/plot_*）事后用
+`--gpu-csv` 对齐：
+
+- 语法：`python sys_monitor.py --out-dir <dir> --interval 5
+  --gpu-monitor-cmd nvidia [--clocks-ecc] [--duration 0=无限]`
+- 启动时打印本机当前时间（与测试端对时用，秒级即可）
+- `--clocks-ecc`：追加采样 `clocks_sm_mhz / clocks_max_mhz /
+  ecc_uncorrected / ecc_corrected` 四列（行尾追加，兼容旧列解析），
+  供降频（throttle）与 ECC 上升判定
+- 测试端合并：`run_stability.py --gpu-csv <全局 gpu_stats.csv>` 按最近
+  邻时间对齐填充 9 个 GPU 列；`run_matrix.py --gpu-csv` 按每组测试
+  起止时间窗聚合；`plot_results.py --gpu-csv` 按窗口切片画时序图
+- 红线判定（事后，run_stability 内 `post_check_redlines`）：
+  降频 = 温度 ≥ 85℃ 且 SM 时钟 < 最高时钟 × 0.9；ECC 上升 = 计数持续增长；
+  结果写 `monitor_events.log` + report JSON `redlines` 字段
 
 GPU 探测参数（`--gpu-monitor-cmd` / `--gpu-ids` / `--gpu-interval` /
 `--no-gpu-monitor` / `--sys-mem-warn-mb` / `--gpu-mem-warn-pct`）见第 1 节
@@ -219,6 +239,15 @@ python run_matrix.py --gpu-monitor-cmd "/usr/bin/mthreads-gmi -q"
 
 # 厂商探测登记示例（sys_monitor.py 内 GPU_PROBES）
 # "custom_vendor": "smi -x | python parse.py"  →  --gpu-monitor-cmd custom_vendor
+
+# 旁路独立采样（服务端，测试与服务分离时用；Ctrl+C 结束）
+python sys_monitor.py --out-dir /tmp/monitor --interval 5 \
+    --gpu-monitor-cmd nvidia --clocks-ecc --duration 0
+
+# 测试端对齐（旁路模式）：跑完后把 gpu_stats.csv 拉回
+python run_matrix.py --gpu-csv gpu_stats.csv
+python run_stability.py --duration 86400 --gpu-csv gpu_stats.csv
+python plot_results.py --results-dir ... --gpu-csv gpu_stats.csv
 ```
 
 ---
@@ -241,6 +270,7 @@ python run_matrix.py --gpu-monitor-cmd "/usr/bin/mthreads-gmi -q"
 | `--results-dir` | 必填 | 结果根目录（含 `summary.csv`） |
 | `--run` | 全部 | 只画指定 run（如 `run-20260814-023631`） |
 | `--gpu-series` | 关 | 同时输出逐组 GPU 时序图 |
+| `--gpu-csv` | 无 | 服务端旁路采样的全局 `gpu_stats.csv`，按每组测试时间窗切片（旁路模式替代组内 gpu_stats.csv） |
 | `--out-dir` | `figures` | 图表输出目录 |
 | `--dpi` | 150 | 图片分辨率 |
 | `--font` | 自动 | 指定中文字体名（绘图机缺字体时用） |

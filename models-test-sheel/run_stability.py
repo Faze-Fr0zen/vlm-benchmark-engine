@@ -10,17 +10,20 @@
     --rate <极限吞吐 70%~80% 对应 req/s> --duration 86400
     随机均匀长短文本混合（短 512~1K / 长 4K~8K，各 50%）。
 
-监控红线：
+测试与服务分离：本脚本只做施压 + vLLM /metrics + 心跳；GPU 采样由
+服务端 sys_monitor.py --standalone --clocks-ecc 旁路落盘，测试结束后
+用 --gpu-csv 传入，按时间戳对齐合并进 stability_series.csv，再做
+红线判定：
+
   - GPU 温度触顶降频（temp 超阈 且 clocks.sm << clocks.max.sm）
   - 显存占用持续上升不回落（内存泄漏，回归斜率判定）
   - ECC 错误计数增加（uncorrected）
-  - Silent Crash（HTTP 心跳连续失败）
+  - Silent Crash（HTTP 心跳连续失败，施压器实时判定）
 
 数据源：随机生成（长度按分布采样 + 随机 token，tokenizer 校准），
 流式窗口只保留在飞请求，内存 O(并发数 x 单请求)，24h 无内存压力。
 
-依赖：Python 3.9+ 标准库 + transformers（tokenizer 生成）；GPU 探测
-复用 sys_monitor 的 CustomProbe / GPU_PROBES。
+依赖：Python 3.9+ 标准库 + transformers（tokenizer 生成）。
 """
 
 import argparse
@@ -30,14 +33,11 @@ import math
 import os
 import random
 import re
-import sys
 import threading
 import time
 import urllib.error
 import urllib.request
 from datetime import datetime as dt
-
-from sys_monitor import CustomProbe, GPU_PROBES, _first_number
 
 MODEL = "qwen3-0.6b"                  # 模型名，必须与 vllm serve --served-model-name 一致
 TOKENIZER_PATH = "/models/Qwen3-0.6B"  # tokenizer 本地路径
@@ -134,32 +134,21 @@ class PromptGenerator:
 # ---------------------------------------------------------------------------
 
 class StabilityMonitor(threading.Thread):
-    """采样 GPU（含 clocks/ECC）+ vLLM metrics + 心跳，写时序 CSV 与事件日志。"""
+    """采样 vLLM metrics + 心跳，写时序 CSV 与事件日志。
 
-    def __init__(self, test_dir, base_url, interval=15.0, gpu_probe=None,
-                 gpu_probe_name=None, temp_warn_c=TEMP_WARN_C):
+    GPU 指标由服务端旁路采样（sys_monitor --standalone），测试结束后
+    由 merge_gpu_stats() 按时间戳对齐合并，红线判定在 post_check_redlines()。
+    """
+
+    def __init__(self, test_dir, base_url, interval=15.0):
         super().__init__(daemon=True, name="stability-monitor")
         self.test_dir = test_dir
         self.base_url = base_url
         self.interval = interval
-        self.gpu_probe = gpu_probe
-        self.gpu_probe_name = gpu_probe_name
-        self.temp_warn_c = temp_warn_c
         self._stop_evt = threading.Event()
         self._rows = []          # 采样行（含时间戳）
         self._events = []        # (时间, 级别, 消息)
-        self._ecc_last = None    # ECC uncorrected 上次值
         self._hb_fails = 0
-        self._clock_probe = None
-        self._ecc_probe = None
-        if gpu_probe:
-            self._clock_probe = CustomProbe(
-                "nvidia-smi --query-gpu=clocks.sm,clocks.max.sm "
-                "--format=csv,noheader,nounits", raw=True)
-            self._ecc_probe = CustomProbe(
-                "nvidia-smi --query-gpu=ecc.errors.uncorrected.aggregate.total,"
-                "ecc.errors.corrected.aggregate.total "
-                "--format=csv,noheader,nounits", raw=True)
 
     def stop(self):
         self._stop_evt.set()
@@ -184,33 +173,6 @@ class StabilityMonitor(threading.Thread):
         t = time.time()
         row = {"ts": f"{t:.1f}"}
 
-        # GPU 常规指标
-        if self.gpu_probe:
-            g = self.gpu_probe.sample()
-            if g:
-                u, _, mu, mt, pw, tc = g[0]
-                row["gpu_util_pct"] = u if u is not None else ""
-                row["gpu_mem_used_mib"] = mu if mu is not None else ""
-                row["gpu_mem_total_mib"] = mt if mt is not None else ""
-                row["gpu_power_w"] = pw if pw is not None else ""
-                row["gpu_temp_c"] = tc if tc is not None else ""
-            # clocks（降频检测）
-            cl = self._clock_probe.sample() if self._clock_probe else []
-            if cl:
-                row["clocks_sm_mhz"] = cl[0][0]
-                row["clocks_max_mhz"] = cl[0][1]
-            # ECC
-            ec = self._ecc_probe.sample() if self._ecc_probe else []
-            if ec and ec[0][0] is not None:
-                row["ecc_uncorrected"] = ec[0][0]
-                cur = float(ec[0][0])
-                if self._ecc_last is not None and cur > self._ecc_last:
-                    self._event("ERROR",
-                                f"ECC uncorrected 计数增加: {self._ecc_last:.0f} -> {cur:.0f}")
-                self._ecc_last = cur
-            if ec and len(ec[0]) > 1 and ec[0][1] is not None:
-                row["ecc_corrected"] = ec[0][1]
-
         # vLLM 队列指标
         vm = fetch_vllm_metrics(self.base_url)
         for k in METRIC_NAMES:
@@ -227,23 +189,6 @@ class StabilityMonitor(threading.Thread):
             if self._hb_fails >= HEARTBEAT_FAILS:
                 self._event("ERROR", "Silent Crash：HTTP 心跳连续失败 "
                                      f"{self._hb_fails} 次，服务可能已不可用")
-
-        # 温度/降频判定
-        tc = row.get("gpu_temp_c")
-        cs, cm = row.get("clocks_sm_mhz"), row.get("clocks_max_mhz")
-        if tc not in ("", None) and float(tc) >= self.temp_warn_c:
-            if cm not in ("", None) and cs not in ("", None):
-                try:
-                    if float(cs) < float(cm) * TEMP_DEGRADE_RATIO:
-                        self._event("ERROR",
-                                    f"GPU 温度 {tc}°C 超阈且已降频 "
-                                    f"(SM {cs} / max {cm} MHz)")
-                    else:
-                        self._event("WARN", f"GPU 温度 {tc}°C 超阈（未降频）")
-                except ValueError:
-                    pass
-            else:
-                self._event("WARN", f"GPU 温度 {tc}°C 超阈（无 clocks 数据）")
 
         # 写入内存并定期落盘
         self._rows.append(row)
@@ -328,6 +273,143 @@ class StabilityMonitor(threading.Thread):
                     findings["queue_growth"] = None
         # 吞吐衰减：由施压器侧统计（见 LoadGenerator.finalize）
         return findings
+
+
+# ---------------------------------------------------------------------------
+# 事后 GPU 合并与红线判定（测试与服务分离）
+# ---------------------------------------------------------------------------
+
+def _read_series(path):
+    """读 stability_series.csv，返回 (header, rows)，rows 为 dict 列表。"""
+    if not os.path.exists(path):
+        return [], []
+    with open(path, "r", encoding="utf-8") as fh:
+        rd = csv.DictReader(fh)
+        rows = [dict(r) for r in rd]
+        return rd.fieldnames or [], rows
+
+
+def _read_gpu_stats(path):
+    """读服务端 gpu_stats.csv，返回 (header, rows)；支持扩展列。"""
+    if not path or not os.path.exists(path):
+        return [], []
+    with open(path, "r", encoding="utf-8") as fh:
+        rd = csv.DictReader(fh)
+        rows = [dict(r) for r in rd]
+        return rd.fieldnames or [], rows
+
+
+def merge_gpu_stats(test_dir, gpu_csv):
+    """把服务端 gpu_stats.csv 按时间戳（最近邻）合并进 stability_series.csv。
+
+    填充列: gpu_util_pct / gpu_mem_used_mib / gpu_mem_total_mib / gpu_power_w /
+    gpu_temp_c / clocks_sm_mhz / clocks_max_mhz / ecc_uncorrected / ecc_corrected。
+    """
+    header, rows = _read_series(os.path.join(test_dir, "stability_series.csv"))
+    if not rows or not gpu_csv or not os.path.exists(gpu_csv):
+        return
+    g_header, g_rows = _read_gpu_stats(gpu_csv)
+    if not g_rows:
+        return
+    gmap = {}
+    for r in g_rows:
+        try:
+            gmap.setdefault(float(r["timestamp"]), r)
+        except (KeyError, ValueError):
+            continue
+    g_ts = sorted(gmap)
+    gpu_cols = ["gpu_util_pct", "gpu_mem_used_mib", "gpu_mem_total_mib",
+                "gpu_power_w", "gpu_temp_c", "clocks_sm_mhz",
+                "clocks_max_mhz", "ecc_uncorrected", "ecc_corrected"]
+    gpu_src = {"gpu_util_pct": "util_pct", "gpu_mem_used_mib": "mem_used_mib",
+               "gpu_mem_total_mib": "mem_total_mib", "gpu_power_w": "power_w",
+               "gpu_temp_c": "temp_c"}
+
+    def nearest(gts):
+        import bisect
+        idx = bisect.bisect_left(g_ts, gts)
+        cand = []
+        if idx > 0:
+            cand.append(g_ts[idx - 1])
+        if idx < len(g_ts):
+            cand.append(g_ts[idx])
+        if not cand:
+            return None
+        return min(cand, key=lambda t: abs(t - gts))
+
+    for row in rows:
+        try:
+            ts = float(row["ts"])
+        except (KeyError, ValueError):
+            continue
+        src = gmap.get(nearest(ts)) if g_ts else None
+        if not src:
+            continue
+        for col in gpu_cols:
+            src_key = gpu_src.get(col, col)
+            val = src.get(src_key)
+            if val not in ("", None):
+                row[col] = val
+
+    new_header = list(header)
+    for col in gpu_cols:
+        if col not in new_header:
+            new_header.append(col)
+    with open(os.path.join(test_dir, "stability_series.csv"), "w", newline="",
+              encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=new_header)
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"[merge] 已合并 GPU 数据: {gpu_csv}（{len(g_ts)} 个采样点）")
+
+
+def post_check_redlines(test_dir, temp_warn_c=TEMP_WARN_C):
+    """扫描合并后的序列做温度降频 / ECC 上升红线判定，事件写 monitor_events.log。
+
+    返回 dict: throttle_events / ecc_events 计数。"""
+    header, rows = _read_series(os.path.join(test_dir, "stability_series.csv"))
+    throttle = ecc = 0
+    ecc_last = None
+    for row in rows:
+        tc = row.get("gpu_temp_c")
+        cs = row.get("clocks_sm_mhz")
+        cm = row.get("clocks_max_mhz")
+        if tc not in ("", None) and cs not in ("", None) and \
+                cm not in ("", None):
+            try:
+                if float(tc) >= temp_warn_c and \
+                        float(cs) < float(cm) * TEMP_DEGRADE_RATIO:
+                    throttle += 1
+                    _append_event(test_dir, "ERROR",
+                                  f"GPU 温度 {tc}°C 超阈且已降频 "
+                                  f"(SM {cs} / max {cm} MHz)")
+                elif float(tc) >= temp_warn_c:
+                    _append_event(test_dir, "WARN",
+                                  f"GPU 温度 {tc}°C 超阈（未降频）")
+            except ValueError:
+                pass
+        eu = row.get("ecc_uncorrected")
+        if eu not in ("", None):
+            try:
+                cur = float(eu)
+                if ecc_last is not None and cur > ecc_last:
+                    ecc += 1
+                    _append_event(test_dir, "ERROR",
+                                  f"ECC uncorrected 计数增加: "
+                                  f"{ecc_last:.0f} -> {cur:.0f}")
+                ecc_last = cur
+            except ValueError:
+                pass
+    print(f"[redline] 降频事件 {throttle} 次，ECC 事件 {ecc} 次"
+          f"（详见 monitor_events.log）")
+    return {"throttle_events": throttle, "ecc_events": ecc}
+
+
+def _append_event(test_dir, level, msg):
+    path = os.path.join(test_dir, "monitor_events.log")
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(f"{dt.now().isoformat(timespec='seconds')} "
+                 f"[{level}] {msg}\n")
 
 
 # ---------------------------------------------------------------------------
@@ -487,7 +569,6 @@ class LoadGenerator(threading.Thread):
                 print(f"[warn] 请求失败 #{self._n_fail}: {exc}")
 
     def run(self):
-        rng = random.Random(20260814)
         interval = 1.0 / self.rate if self.rate and math.isfinite(self.rate) else 0.0
         next_submit = time.time()
         while not self._stop_evt.is_set():
@@ -538,8 +619,6 @@ class LoadGenerator(threading.Thread):
             return {"throughput_decay": None,
                     "latency": None, "summary": (ok, fail, to, len(lats))}
         half = len(lats) // 2
-        first_half = [e for _, e, *_ in lats[:half]]
-        second_half = [e for _, e, *_ in lats[half:]]
         t0 = lats[0][0]
         t1 = lats[half - 1][0] if half > 1 else lats[-1][0]
         span = max((t1 - t0) / 60.0, 1e-6)
@@ -580,9 +659,11 @@ def parse_args():
     p.add_argument("--metrics-interval", type=float, default=15.0,
                    help="监控采样间隔秒数")
     p.add_argument("--temp-warn", type=float, default=TEMP_WARN_C,
-                   help="温度告警阈值（℃）")
-    p.add_argument("--gpu-monitor-cmd", default="nvidia",
-                   help="GPU 探测（注册表短名或完整命令；不传则不采样 GPU）")
+                   help="温度告警阈值（℃），事后红线判定用")
+    p.add_argument("--gpu-csv", default=None,
+                   help="服务端旁路采样的 gpu_stats.csv 路径（sys_monitor.py "
+                        "--standalone --clocks-ecc 输出），结束后合并进时序并"
+                        "做降频/ECC 红线判定")
     p.add_argument("--result-dir", default=None, help="结果根目录（默认 RESULTS_DIR）")
     p.add_argument("--run-id", default=None, help="运行标识（默认按时间生成）")
     p.add_argument("--dry-run", action="store_true", help="只演示请求生成，不真正压测")
@@ -619,25 +700,16 @@ def main():
     print(f"长度分布: 短{SHORT_IN_RANGE}x{SHORT_RATIO:.0%} "
           f"/ 长{LONG_IN_RANGE}x{1 - SHORT_RATIO:.0%}, "
           f"输出{OUT_RANGE}")
-
-    # GPU 探测
-    gpu_probe, gpu_name = None, None
-    if args.gpu_monitor_cmd and not args.dry_run:
-        cmd = GPU_PROBES.get(args.gpu_monitor_cmd, args.gpu_monitor_cmd)
-        gpu_probe = CustomProbe(cmd)
-        if gpu_probe.sample():
-            gpu_name = f"{args.gpu_monitor_cmd}({cmd.split()[0]})"
-            print(f"GPU 采样使用: {gpu_name}（间隔 {args.metrics_interval}s）")
-        else:
-            print(f"[warn] GPU 探测失败: {args.gpu_monitor_cmd}，仅监控系统指标")
+    if args.gpu_csv and not os.path.exists(args.gpu_csv):
+        print(f"[warn] --gpu-csv 指定的文件不存在: {args.gpu_csv}，"
+              f"GPU 相关红线判定将缺失（不中断测试）")
+    elif args.gpu_csv:
+        print(f"[info] GPU 数据将由 {args.gpu_csv} 事后合并（时间戳对齐）")
 
     monitor = None
     if not args.dry_run:
         monitor = StabilityMonitor(test_dir, args.base_url,
-                                   interval=args.metrics_interval,
-                                   gpu_probe=gpu_probe,
-                                   gpu_probe_name=gpu_name,
-                                   temp_warn_c=args.temp_warn)
+                                   interval=args.metrics_interval)
         monitor.start()
 
     tok = None if args.dry_run else _load_tokenizer()
@@ -669,9 +741,12 @@ def main():
     if monitor:
         monitor.stop()
         monitor.join(timeout=10)
+        merge_gpu_stats(test_dir, args.gpu_csv)
         findings = monitor.finalize()
+        redlines = post_check_redlines(test_dir, args.temp_warn)
     else:
         findings = {}
+        redlines = {"throttle_events": 0, "ecc_events": 0}
 
     res = loader.finalize()
     ok, fail, to, nl = res["summary"]
@@ -687,6 +762,7 @@ def main():
         "trends": {"throughput_decay": res["throughput_decay"],
                    "queue_growth": findings.get("queue_growth"),
                    "mem_leak": findings.get("mem_leak")},
+        "redlines": redlines,
     }
     # 延迟分位数
     lats = res["latency"] or []

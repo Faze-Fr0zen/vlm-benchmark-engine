@@ -23,7 +23,6 @@ monitor_events.log 中的 ERROR 事件画红色竖线（≤5 条时附文字）�
 import argparse
 import csv
 import json
-import math
 import os
 import re
 import sys
@@ -33,7 +32,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from plot_results import CJK_FONTS, setup_fonts, save, _first_number
+from plot_results import setup_fonts, save, _first_number
 
 _EVENT_RE = re.compile(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}) \[(\w+)\] (.*)")
 
