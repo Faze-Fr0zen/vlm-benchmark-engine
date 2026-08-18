@@ -95,7 +95,7 @@
 | `--num-prompts-long` | 20 | 长文本每组请求数 |
 | `--max-concurrency` | short=32 / long=16 | 客户端并发上限（防 Prefill 堆积 TTFT 爆炸），0=不限制 |
 | `--result-dir` | 顶部 `RESULTS_DIR` | 结果根目录（本地调试用 `results` 覆盖） |
-| `--run-id` | 按时间 | 本次运行标识 |
+| `--run-id` | 按时间（`run-p2-YYYYMMDD-HHMMSS`） | 本次运行标识 |
 | `--timeout` | 7200 | 单组测试超时（秒） |
 | `--sleep-between` | 5.0 | 相邻测试间隔（秒） |
 | `--warmup` | 关 | 矩阵前先跑一组小规模预热 |
@@ -168,7 +168,7 @@ python run_matrix_lite.py --run-id run-lite-01
 | `--temp-warn` | 85.0 | 温度告警阈值（℃） |
 | `--gpu-monitor-cmd` | nvidia | GPU 探测（注册表短名或完整命令；不传则不采样） |
 | `--result-dir` | 顶部 `RESULTS_DIR` | 结果根目录 |
-| `--run-id` | 按时间 | 运行标识 |
+| `--run-id` | 按时间（`run-p3-1-*` / `run-p3-2-*`，按速率自动区分） | 运行标识 |
 | `--dry-run` | 关 | 只演示请求生成，不真正压测 |
 
 ### 代码示例

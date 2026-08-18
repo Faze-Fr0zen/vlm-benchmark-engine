@@ -603,7 +603,8 @@ def main():
     TOKENIZER_PATH = args.tokenizer
 
     result_root = args.result_dir or RESULTS_DIR
-    run_id = args.run_id or dt.now().strftime("run-%Y%m%d-%H%M%S")
+    stage = "p3-1" if math.isinf(args.rate) else "p3-2"
+    run_id = args.run_id or dt.now().strftime(f"run-{stage}-%Y%m%d-%H%M%S")
     test_dir = os.path.join(result_root, run_id)
     if not args.dry_run:
         os.makedirs(test_dir, exist_ok=True)

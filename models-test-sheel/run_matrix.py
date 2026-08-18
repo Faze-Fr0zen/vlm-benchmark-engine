@@ -486,7 +486,7 @@ def main():
           f"{' / gpu_stats.csv' if args.gpu_probe is not None else ''}；"
           f"泄漏检测: 系统内存≥50MB/min、显存≥100MB/min")
 
-    run_id = args.run_id or dt.datetime.now().strftime("run-%Y%m%d-%H%M%S")
+    run_id = args.run_id or dt.datetime.now().strftime("run-p2-%Y%m%d-%H%M%S")
     run_started = dt.datetime.now()
     run_dir = os.path.join(args.result_dir, run_id)
     if not args.dry_run:
