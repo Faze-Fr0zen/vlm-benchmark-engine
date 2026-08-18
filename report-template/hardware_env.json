@@ -1,0 +1,104 @@
+{
+  "_comment": "环境信息模板（每厂商一份，如 hardware_env_ascend.json / hardware_env_hygon.json）。所有字段填写后与报告正文互相引用；空字段保持 null / 空字符串即可。首次接入新厂商必填：accelerator / software_stack / gpu_probe。",
+  "vendor": "",
+
+  "report_meta": {
+    "report_id": "",
+    "tester": "",
+    "date": "",
+    "location": "",
+    "test_plan_version": ""
+  },
+
+  "hardware": {
+    "server": {
+      "model": "",
+      "cpu": "",
+      "cpu_cores": null,
+      "memory_gb": null,
+      "nvme": "",
+      "os": "",
+      "kernel": "",
+      "docker": ""
+    },
+    "accelerator": {
+      "name": "",
+      "arch": "",
+      "process_nm": null,
+      "fp16_tflops": null,
+      "bf16_tflops": null,
+      "fp8_tflops": null,
+      "int8_tops": null,
+      "hbm_capacity_gb": null,
+      "hbm_bandwidth_gbps": null,
+      "tdp_w": null,
+      "cards_installed": null,
+      "cards_used": null,
+      "interconnect_type": "",
+      "interconnect_bandwidth": "",
+      "topology_note": ""
+    },
+    "software_stack": {
+      "driver_version": "",
+      "runtime": {
+        "name": "",
+        "version": ""
+      },
+      "inference_engine": {
+        "name": "vllm",
+        "version": "",
+        "fork": "",
+        "notes": ""
+      },
+      "container_image": "",
+      "compute_lib": ""
+    },
+    "gpu_probe": {
+      "short_name": "",
+      "command": "",
+      "regex": "",
+      "notes": ""
+    }
+  },
+
+  "model_deployment": {
+    "model": {
+      "name": "",
+      "params_b": null,
+      "quantization": "",
+      "context_len": null,
+      "tokenizer": "",
+      "model_path": ""
+    },
+    "engine_args": {
+      "tensor_parallel_size": null,
+      "pipeline_parallel_size": null,
+      "gpu_memory_utilization": null,
+      "max_num_seqs": null,
+      "max_num_batched_tokens": null,
+      "enable_chunked_prefill": false,
+      "kv_cache_dtype": "",
+      "enable_prefix_caching": false,
+      "other_flags": ""
+    },
+    "bench_args": {
+      "num_prompts_short": null,
+      "num_prompts_long": null,
+      "max_concurrency_short": null,
+      "max_concurrency_long": null,
+      "bench_tool": "vllm bench serve",
+      "bench_tool_version": ""
+    }
+  },
+
+  "acceptance_lines": {
+    "_comment": "达标线判定（生成报告 5.1 节自动判定）。每项填量化阈值；留 null 则报告该行输出 TODO 人工判定。判定口径：short/long 极限吞吐取各组最大 output_throughput；TTFT 取所有组合中「推荐速率点 P99 TTFT / 最低速率基线」的最大倍数；失败率=num_failed/num_requests；OOM 组含 OOM/TIMEOUT/FAILED；稳定性红线=P3 trends 全 null 或全通过且无 ERROR 事件；GPU 利用率=全 run 组级峰值最大值。",
+    "short_peak_tok_s": null,
+    "long_peak_tok_s": null,
+    "p99_ttft_ratio_max": 2.0,
+    "max_failure_rate_pct": 0.0,
+    "max_bad_groups": 0,
+    "stability_redlines_ok": true,
+    "min_gpu_util_pct": 80.0
+  }
+}
