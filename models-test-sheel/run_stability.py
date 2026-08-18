@@ -95,38 +95,33 @@ def fetch_heartbeat(base_url):
 
 
 # ---------------------------------------------------------------------------
-# 请求生成（随机文本 + tokenizer 校准）
+# 请求生成（随机中英文文本，长度按字符/token 比例折算，不依赖 tokenizer）
 # ---------------------------------------------------------------------------
 
-def _load_tokenizer():
-    try:
-        from transformers import AutoTokenizer
-        return AutoTokenizer.from_pretrained(TOKENIZER_PATH)
-    except Exception as exc:
-        print(f"[warn] 无法加载 tokenizer（{exc}），退化用纯 ASCII 随机文本")
-        return None
-
-
 class PromptGenerator:
-    def __init__(self, tokenizer, rng):
-        self.tok = tokenizer
-        self.rng = rng
-        self.vocab_size = len(tokenizer) if tokenizer is not None else 0
-        self._special = set(tokenizer.all_special_ids) if tokenizer is not None else set()
+    """生成约 target_len token 的 prompt 文本。
+
+    避免在容器内加载慢速 tokenizer（decode 长 id 列表会卡死施压线程），
+    改为随机中英文混合文本：中文约 1 字/token、英文约 4 字符/token，
+    混合后按 0.5 token/字符 折算目标字符数。
+    """
+
+    _CJK = "".join(chr(c) for c in range(0x4E00, 0x9FFF))
+    _LATIN = "abcdefghijklmnopqrstuvwxyz0123456789 ,.;:!?"
+
+    def __init__(self, rng=None):
+        self.rng = rng or random.Random()
 
     def gen(self, target_len):
-        """生成约 target_len token 的 prompt 文本（随机 token id -> decode）。"""
-        if self.tok is None:
-            chars = "abcdefghijklmnopqrstuvwxyz0123456789,.;:!? 你我他它是一个有的和不在"
-            text = "".join(self.rng.choice(chars) for _ in range(max(16, target_len * 3)))
-            return text
-        ids = []
-        while len(ids) < target_len:
-            cand = self.rng.randrange(self.vocab_size)
-            if cand in self._special:
-                continue
-            ids.append(cand)
-        return self.tok.decode(ids, skip_special_tokens=True)
+        n_chars = max(16, int(target_len * 2))
+        text = []
+        append = text.append
+        choice = self.rng.choice
+        cjk = self._CJK
+        latin = self._LATIN
+        for _ in range(n_chars):
+            append(choice(cjk) if choice((True, False)) else choice(latin))
+        return "".join(text)
 
 
 # ---------------------------------------------------------------------------
@@ -712,8 +707,7 @@ def main():
                                    interval=args.metrics_interval)
         monitor.start()
 
-    tok = None if args.dry_run else _load_tokenizer()
-    gen = PromptGenerator(tok, random.Random(1))
+    gen = PromptGenerator(random.Random(1))
     loader = LoadGenerator(args.base_url, args.model, gen, OUT_RANGE,
                            args.rate, args.max_concurrency, args.duration,
                            dry_run=args.dry_run)
