@@ -1,15 +1,13 @@
 {
-  "_comment": "环境信息模板（每厂商一份，如 hardware_env_ascend.json / hardware_env_hygon.json）。所有字段填写后与报告正文互相引用；空字段保持 null / 空字符串即可。首次接入新厂商必填：accelerator / software_stack / gpu_probe。",
-  "vendor": "",
-
+  "_comment": "测试服务器环境信息（NVIDIA RTX 4090 容器, 部分字段待正式环境补充）",
+  "vendor": "NVIDIA 测试环境",
   "report_meta": {
-    "report_id": "",
-    "tester": "",
-    "date": "",
-    "location": "",
+    "report_id": "TEST-20260819",
+    "tester": "测试员",
+    "date": "2026-08-19",
+    "location": "测试容器 aafcef7e29c8",
     "test_plan_version": ""
   },
-
   "hardware": {
     "server": {
       "model": "",
@@ -17,41 +15,41 @@
       "cpu_cores": null,
       "memory_gb": null,
       "nvme": "",
-      "os": "",
+      "os": "Linux 容器",
       "kernel": "",
-      "docker": ""
+      "docker": "vllm-workspace"
     },
     "accelerator": {
-      "name": "",
-      "arch": "",
-      "process_nm": null,
-      "fp16_tflops": null,
+      "name": "RTX 4090",
+      "arch": "Ada Lovelace",
+      "process_nm": 4,
+      "fp16_tflops": 82.6,
       "bf16_tflops": null,
       "fp8_tflops": null,
       "int8_tops": null,
-      "hbm_capacity_gb": null,
-      "hbm_bandwidth_gbps": null,
-      "tdp_w": null,
-      "cards_installed": null,
-      "cards_used": null,
-      "interconnect_type": "",
+      "hbm_capacity_gb": 24,
+      "hbm_bandwidth_gbps": 1008,
+      "tdp_w": 350,
+      "cards_installed": 1,
+      "cards_used": 1,
+      "interconnect_type": "PCIe 4.0 x16",
       "interconnect_bandwidth": "",
       "topology_note": ""
     },
     "software_stack": {
       "driver_version": "",
       "runtime": {
-        "name": "",
-        "version": ""
+        "name": "CUDA UMD",
+        "version": "13.3"
       },
       "inference_engine": {
         "name": "vllm",
-        "version": "",
+        "version": "0.26.0",
         "fork": "",
         "notes": ""
       },
       "container_image": "",
-      "compute_lib": ""
+      "compute_lib": "torch 2.11.0+cu130"
     },
     "gpu_probe": {
       "short_name": "",
@@ -60,39 +58,37 @@
       "notes": ""
     }
   },
-
   "model_deployment": {
     "model": {
-      "name": "",
-      "params_b": null,
-      "quantization": "",
-      "context_len": null,
-      "tokenizer": "",
-      "model_path": ""
+      "name": "Qwen3-0.6B",
+      "params_b": 0.6,
+      "quantization": "fp16",
+      "context_len": 32768,
+      "tokenizer": "/models/Qwen3-0.6B",
+      "model_path": "/models/Qwen3-0.6B"
     },
     "engine_args": {
-      "tensor_parallel_size": null,
+      "tensor_parallel_size": 1,
       "pipeline_parallel_size": null,
-      "gpu_memory_utilization": null,
-      "max_num_seqs": null,
+      "gpu_memory_utilization": 0.9,
+      "max_num_seqs": 128,
       "max_num_batched_tokens": null,
       "enable_chunked_prefill": false,
-      "kv_cache_dtype": "",
+      "kv_cache_dtype": "fp8",
       "enable_prefix_caching": false,
       "other_flags": ""
     },
     "bench_args": {
-      "num_prompts_short": null,
-      "num_prompts_long": null,
-      "max_concurrency_short": null,
-      "max_concurrency_long": null,
+      "num_prompts_short": 120,
+      "num_prompts_long": 16,
+      "max_concurrency_short": 64,
+      "max_concurrency_long": 1,
       "bench_tool": "vllm bench serve",
       "bench_tool_version": ""
     }
   },
-
   "acceptance_lines": {
-    "_comment": "达标线判定（生成报告 5.1 节自动判定）。每项填量化阈值；留 null 则报告该行输出 TODO 人工判定。判定口径：short/long 极限吞吐取各组最大 output_throughput；TTFT 取所有组合中「推荐速率点 P99 TTFT / 最低速率基线」的最大倍数；失败率=num_failed/num_requests；OOM 组含 OOM/TIMEOUT/FAILED；稳定性红线=P3 trends 全 null 或全通过且无 ERROR 事件；GPU 利用率=全 run 组级峰值最大值。",
+    "_comment": "达标线判定（生成报告 5.1 节自动判定）。每项填量化阈值；留 null 则报告该行输出 TODO 人工判定。",
     "short_peak_tok_s": null,
     "long_peak_tok_s": null,
     "p99_ttft_ratio_max": 2.0,

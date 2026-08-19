@@ -234,8 +234,12 @@ def main():
     all_rows = []
     for run_dir in runs:
         all_rows += load_summary(run_dir)
-    all_rows.sort(key=lambda r: po.to_float(r, "score") or -1.0,
-                  reverse=True)
+    score_rows = sorted(all_rows,
+                        key=lambda r: po.to_float(r, "score") or -1.0,
+                        reverse=True)
+    timeline = sorted(all_rows,
+                      key=lambda r: (r.get("_run") or "",
+                                     r.get("timestamp") or ""))
 
     os.makedirs(args.out_dir, exist_ok=True)
     out_csv = os.path.join(args.out_dir, "opt_summary.csv")
@@ -245,11 +249,11 @@ def main():
     with open(out_csv, "w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(all_rows)
+        writer.writerows(score_rows)
     print(f"[report] 评分表已写入: {out_csv}")
 
-    accepted = po.accept_rows(all_rows)
-    steps = replay_convergence(all_rows, args.lite, args.serve_base)
+    accepted = po.accept_rows(score_rows)
+    steps = replay_convergence(timeline, args.lite, args.serve_base)
     locked_cmd = extract_locked_cmd(steps)
     lines = ["# Serve 参数调优报告", "",
              "## 锁定配置", ""]
@@ -269,7 +273,7 @@ def main():
         lines += ["> 无 ACCEPT 记录，锁定命令取自收敛引擎最终输出。", ""]
 
     lines += render_convergence(steps)
-    lines += render_score_table(all_rows)
+    lines += render_score_table(score_rows)
 
     before = after = None
     if args.p2_before and args.p2_after:
