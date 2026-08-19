@@ -167,7 +167,8 @@ def config_from_row(row):
 
 # ---- 收敛引擎 -------------------------------------------------------------
 
-def next_action(rows, lite=False, serve_base=DEFAULT_SERVE_BASE):
+def next_action(rows, lite=False, serve_base=DEFAULT_SERVE_BASE,
+                kv_fp8=True):
     """读评分表，输出下一步动作。返回 (文本行列表, 退出码 0=继续 1=锁定期权)。"""
     lines = []
 
@@ -209,45 +210,52 @@ def next_action(rows, lite=False, serve_base=DEFAULT_SERVE_BASE):
     # Round 2: top1 上补扫 kv-dtype
     # 完成判定放宽：auto 对照组复用 R1 top1 记录；fp8 组按 seqs 匹配
     # （显存不足时 mem 可能被手动下调，如 0.95->0.9，容忍该差异）
-    r2_combos = round2_combos(top_cfg)
-    r2_auto_done = top is not None
-    r2_fp8_done = any(r.get("round") == "2"
-                      and r.get("kv_cache_dtype") == "fp8"
-                      and str(r.get("max_num_seqs")) == str(top_cfg.get("max_num_seqs"))
-                      for r in rows)
-    pending_r2 = [c for c in r2_combos
-                  if not (c["kv_cache_dtype"] == "auto" and r2_auto_done)
-                  and not (c["kv_cache_dtype"] == "fp8" and r2_fp8_done)]
-    if pending_r2:
-        cfg = pending_r2[0]
-        lines.append(f"[Round 2] kv-dtype 补扫（{len(pending_r2)} 组剩余）:")
-        lines.append(f"  启动命令: {serve_command(cfg, serve_base)}")
-        lines.append(f"  [判定] 启动后运行: python probe_only.py --config "
-                     f"\"{config_arg(cfg)}\"")
-        return lines, 0
-
-    # Round 2 完成 -> fp8 胜负判定 -> Round 2.5 或 Round 3
-    fp8_row = next((r for r in rows
-                    if r.get("round") == "2"
-                    and r.get("kv_cache_dtype") == "fp8"), None)
-    auto_row = next((r for r in rows
-                     if r.get("round") == "2"
-                     and r.get("kv_cache_dtype") == "auto"), None)
-    if auto_row is None:
+    if not kv_fp8:
+        lines.append("[Round 2] --no-kv-fp8: 当前环境不支持 kv-cache-dtype=fp8"
+                     "（如国产卡），跳过补扫，直接进入 Round 3")
+        fp8_row = None
         auto_row = next((r for r in rows
                          if r.get("config_id") == top["config_id"]), None)
-    if fp8_row and auto_row and \
-            (to_float(fp8_row, "score") or -1) > (to_float(auto_row, "score") or -1):
-        lines.append(f"[Round 2] fp8 胜出（{fp8_row['score']} vs {auto_row['score']}），")
-        rejected = [r for r in rows if r.get("round") == "1"
-                    and r.get("verdict") == "REJECT"]
-        if rejected:
-            lines.append("  进入 Round 2.5 复活点验证:")
-            lines.append(f"  启动命令: {serve_command(dict(top_cfg, kv_cache_dtype='fp8'), serve_base)}")
-            lines.append("  [判定] 以 fp8 重测 Round 1 中 REJECT 的大显存/高并发点")
-            return lines, 1
-        lines.append("  R1 无 REJECT 点，跳过 Round 2.5，进入 Round 3 调度 A/B")
-        top_cfg = dict(top_cfg, kv_cache_dtype="fp8")
+    else:
+        r2_combos = round2_combos(top_cfg)
+        r2_auto_done = top is not None
+        r2_fp8_done = any(r.get("round") == "2"
+                          and r.get("kv_cache_dtype") == "fp8"
+                          and str(r.get("max_num_seqs")) == str(top_cfg.get("max_num_seqs"))
+                          for r in rows)
+        pending_r2 = [c for c in r2_combos
+                      if not (c["kv_cache_dtype"] == "auto" and r2_auto_done)
+                      and not (c["kv_cache_dtype"] == "fp8" and r2_fp8_done)]
+        if pending_r2:
+            cfg = pending_r2[0]
+            lines.append(f"[Round 2] kv-dtype 补扫（{len(pending_r2)} 组剩余）:")
+            lines.append(f"  启动命令: {serve_command(cfg, serve_base)}")
+            lines.append(f"  [判定] 启动后运行: python probe_only.py --config "
+                         f"\"{config_arg(cfg)}\"")
+            return lines, 0
+
+        # Round 2 完成 -> fp8 胜负判定 -> Round 2.5 或 Round 3
+        fp8_row = next((r for r in rows
+                        if r.get("round") == "2"
+                        and r.get("kv_cache_dtype") == "fp8"), None)
+        auto_row = next((r for r in rows
+                         if r.get("round") == "2"
+                         and r.get("kv_cache_dtype") == "auto"), None)
+        if auto_row is None:
+            auto_row = next((r for r in rows
+                             if r.get("config_id") == top["config_id"]), None)
+        if fp8_row and auto_row and \
+                (to_float(fp8_row, "score") or -1) > (to_float(auto_row, "score") or -1):
+            lines.append(f"[Round 2] fp8 胜出（{fp8_row['score']} vs {auto_row['score']}），")
+            rejected = [r for r in rows if r.get("round") == "1"
+                        and r.get("verdict") == "REJECT"]
+            if rejected:
+                lines.append("  进入 Round 2.5 复活点验证:")
+                lines.append(f"  启动命令: {serve_command(dict(top_cfg, kv_cache_dtype='fp8'), serve_base)}")
+                lines.append("  [判定] 以 fp8 重测 Round 1 中 REJECT 的大显存/高并发点")
+                return lines, 1
+            lines.append("  R1 无 REJECT 点，跳过 Round 2.5，进入 Round 3 调度 A/B")
+            top_cfg = dict(top_cfg, kv_cache_dtype="fp8")
 
     # fp8 未胜出 -> Round 3 调度 A/B
     if not fp8_row and not auto_row:
@@ -390,6 +398,9 @@ def parse_args():
     p.add_argument("--probe-timeout", type=int, default=1500,
                    help="单探针超时秒数")
     p.add_argument("--lite", action="store_true", help="4090 小体量矩阵")
+    p.add_argument("--no-kv-fp8", action="store_true",
+                   help="当前环境不支持 kv-cache-dtype=fp8（如国产卡），"
+                        "Round 2 补扫直接跳过")
     p.add_argument("--dry-run", action="store_true",
                    help="只打印收敛引擎建议，不跑探针")
     return p.parse_args()
@@ -494,7 +505,8 @@ def main():
 
     print(f"\n{'='*72}\n[收敛引擎] 读取评分表（{len(rows)} 条记录）:")
     lines, exit_code = next_action(rows, lite=args.lite,
-                                   serve_base=args.serve_base)
+                                   serve_base=args.serve_base,
+                                   kv_fp8=not args.no_kv_fp8)
     for line in lines:
         print(line)
     print(f"评分表: {summary_path}")
