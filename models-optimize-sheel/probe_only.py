@@ -189,7 +189,7 @@ def next_action(rows, lite=False, serve_base=DEFAULT_SERVE_BASE):
         return lines, 0
 
     # Round 1 完成 -> 晋级判定
-    lines.append("[Round 1] 完成 9 组，收敛判定:")
+    lines.append(f"[Round 1] 完成 {len(r1_combos)} 组，收敛判定:")
     accepted = accept_rows([r for r in rows if r.get("round") == "1"])
     if not accepted:
         lines.append("  [结论] 全部 REJECT——显存/并发均不满足，按建议降档：")
