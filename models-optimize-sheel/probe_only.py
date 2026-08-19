@@ -254,8 +254,15 @@ def next_action(rows, lite=False, serve_base=DEFAULT_SERVE_BASE):
         lines.append("  [warn] Round 2 无评分记录，跳过 fp8 判定")
     lines.append(f"[Round 3] 调度 A/B 控制变量（top1 = {top['config_id']}）:")
     r3_combos = round3_combos(top_cfg, lite)
-    r3_done = {r.get("config_id") for r in rows if r.get("round") == "3"}
-    pending_r3 = [c for c in r3_combos if cid_of(3, c) not in r3_done]
+
+    def _r3_key(cfg):
+        return (str(cfg.get("max_num_seqs")), str(cfg.get("kv_cache_dtype")),
+                str(cfg.get("enable_chunked_prefill")),
+                str(cfg.get("max_num_batched_tokens")))
+
+    r3_done_keys = {_r3_key(config_from_row(r))
+                    for r in rows if r.get("round") == "3"}
+    pending_r3 = [c for c in r3_combos if _r3_key(c) not in r3_done_keys]
     if pending_r3:
         cfg = pending_r3[0]
         lines.append(f"  （{len(pending_r3)} 组剩余）")
