@@ -207,9 +207,17 @@ def next_action(rows, lite=False, serve_base=DEFAULT_SERVE_BASE):
     top_cfg = config_from_row(top)
 
     # Round 2: top1 上补扫 kv-dtype
+    # 完成判定放宽：auto 对照组复用 R1 top1 记录；fp8 组按 seqs 匹配
+    # （显存不足时 mem 可能被手动下调，如 0.95->0.9，容忍该差异）
     r2_combos = round2_combos(top_cfg)
-    r2_done = {r.get("config_id") for r in rows if r.get("round") == "2"}
-    pending_r2 = [c for c in r2_combos if cid_of(2, c) not in r2_done]
+    r2_auto_done = top is not None
+    r2_fp8_done = any(r.get("round") == "2"
+                      and r.get("kv_cache_dtype") == "fp8"
+                      and str(r.get("max_num_seqs")) == str(top_cfg.get("max_num_seqs"))
+                      for r in rows)
+    pending_r2 = [c for c in r2_combos
+                  if not (c["kv_cache_dtype"] == "auto" and r2_auto_done)
+                  and not (c["kv_cache_dtype"] == "fp8" and r2_fp8_done)]
     if pending_r2:
         cfg = pending_r2[0]
         lines.append(f"[Round 2] kv-dtype 补扫（{len(pending_r2)} 组剩余）:")
@@ -219,21 +227,30 @@ def next_action(rows, lite=False, serve_base=DEFAULT_SERVE_BASE):
         return lines, 0
 
     # Round 2 完成 -> fp8 胜负判定 -> Round 2.5 或 Round 3
-    r2_rows = [r for r in rows if r.get("round") == "2"]
-    fp8_row = next((r for r in r2_rows
-                    if r.get("kv_cache_dtype") == "fp8"), None)
-    auto_row = next((r for r in r2_rows
-                     if r.get("kv_cache_dtype") == "auto"), None)
+    fp8_row = next((r for r in rows
+                    if r.get("round") == "2"
+                    and r.get("kv_cache_dtype") == "fp8"), None)
+    auto_row = next((r for r in rows
+                     if r.get("round") == "2"
+                     and r.get("kv_cache_dtype") == "auto"), None)
+    if auto_row is None:
+        auto_row = next((r for r in rows
+                         if r.get("config_id") == top["config_id"]), None)
     if fp8_row and auto_row and \
             (to_float(fp8_row, "score") or -1) > (to_float(auto_row, "score") or -1):
-        lines.append(f"[Round 2] fp8 胜出（{fp8_row['score']} vs {auto_row['score']}），"
-                     f"进入 Round 2.5 复活点验证:")
-        lines.append(f"  启动命令: {serve_command(dict(top_cfg, kv_cache_dtype='fp8'), serve_base)}")
-        lines.append("  [判定] 以 fp8 重测 Round 1 中 REJECT 的大显存/高并发点")
-        return lines, 1
+        lines.append(f"[Round 2] fp8 胜出（{fp8_row['score']} vs {auto_row['score']}），")
+        rejected = [r for r in rows if r.get("round") == "1"
+                    and r.get("verdict") == "REJECT"]
+        if rejected:
+            lines.append("  进入 Round 2.5 复活点验证:")
+            lines.append(f"  启动命令: {serve_command(dict(top_cfg, kv_cache_dtype='fp8'), serve_base)}")
+            lines.append("  [判定] 以 fp8 重测 Round 1 中 REJECT 的大显存/高并发点")
+            return lines, 1
+        lines.append("  R1 无 REJECT 点，跳过 Round 2.5，进入 Round 3 调度 A/B")
+        top_cfg = dict(top_cfg, kv_cache_dtype="fp8")
 
     # fp8 未胜出 -> Round 3 调度 A/B
-    if not r2_rows:
+    if not fp8_row and not auto_row:
         lines.append("  [warn] Round 2 无评分记录，跳过 fp8 判定")
     lines.append(f"[Round 3] 调度 A/B 控制变量（top1 = {top['config_id']}）:")
     r3_combos = round3_combos(top_cfg, lite)
