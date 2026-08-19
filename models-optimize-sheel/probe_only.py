@@ -409,7 +409,7 @@ def main():
     round_tag = args.round or detect_round(cfg)
     cid = f"R{round_tag}-" + config_label(cfg)
     run_root = args.result_dir or RESULTS_DIR
-    run_id = args.run_id or dt.datetime.now().strftime("run-opt-%Y%m%d-%H%M%S")
+    run_id = args.run_id or dt.datetime.now().strftime("run-opt-%Y%m%d")
     run_dir = os.path.join(run_root, run_id)
     summary_path = os.path.join(run_dir, "summary.csv")
     os.makedirs(run_dir, exist_ok=True)
