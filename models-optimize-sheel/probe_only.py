@@ -57,7 +57,9 @@ LITE_BATCHED = [4096, 8192]
 # 探针定义（双探针展开，供收敛引擎直接使用）
 PROBE_SHORT = {"input_len": 1024, "output_len": 512, "request_rate": "inf",
                "num_prompts": 120, "max_concurrency": 64}
-PROBE_LONG = {"input_len": 32768, "output_len": 1024, "request_rate": "1",
+# long 输入 30K：30K 输入 + 1K 输出 = 31K < 默认服务 max-model-len 32K；
+# 原 32K 输入 + 1K 输出会超限导致全部请求 400 失败
+PROBE_LONG = {"input_len": 30000, "output_len": 1024, "request_rate": "1",
               "num_prompts": 16, "max_concurrency": 1}
 PROBE_SHORT_LITE = dict(PROBE_SHORT, num_prompts=60)
 PROBE_LONG_LITE = dict(PROBE_LONG, num_prompts=8)
