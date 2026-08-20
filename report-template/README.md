@@ -27,7 +27,7 @@ opt_summary.csv + best_serve_cmd.txt ├→ generate_tuning_guide.py → 调优�
 | `report_template.md` | 填写式主模板（基准测试报告）：摘要 → 环境 → 模型部署 → P2 矩阵 → P3 稳定性 → 达标线判定 → 配置推荐 → 附录 |
 | `hardware_env.json` | 环境信息模板，**每厂商复制一份**（如 `hardware_env_ascend.json`），含硬件/软件栈/GPU 探测登记/达标线/模型参数 |
 | `generate_report.py` | 基准测试报告生成：机器可读部分自动填充，结论留 TODO |
-| `generate_tuning_guide.py` | 参数调优指南生成：锁定配置/评分表/验收对比/硬件资源估算自动填充 |
+| `generate_tuning_guide.py` | 参数调优指南生成（客户版）：硬件/环境/参数配置/前后对比/提升总结自动填充 |
 | `validate_env.py` | `hardware_env.json` 字段完整性与类型校验（含拼写检查） |
 | `report_demo.md` | 基准测试报告示例草稿（本地示例数据生成） |
 | `tuning_guide_demo.md` | 参数调优指南示例草稿（`data/opt-demo/` 示例数据生成） |
@@ -35,7 +35,7 @@ opt_summary.csv + best_serve_cmd.txt ├→ generate_tuning_guide.py → 调优�
 ## 脚本关键信息
 
 - **基准测试报告**：数据源 `summary.csv`（必填）+ `stability_report.json` / `monitor_events.log`（可选）+ `hardware_env.json`（必填）；判定口径与 `plot_results.py` 一致（排队临界 rate = P99 TTFT 首次 ≥ 最低速率基线 2 倍；吞吐饱和 = 吞吐首次达峰值 95%）
-- **参数调优指南**：数据源 `models-optimize-sheel/report.py` 产物（`opt_summary.csv` + `best_serve_cmd.txt`）+ `hardware_env.json`；锁定配置取 ACCEPT 最高分；硬件资源建议按锁定配置实测显存峰值与权重体积估算
+- **参数调优指南（客户版）**：数据源 `models-optimize-sheel/report.py` 产物（`opt_summary.csv` + `best_serve_cmd.txt`）+ `hardware_env.json` + 调优前后两个 run_matrix 目录；只呈现结果（硬件/环境/参数/前后对比/提升总结），过程性内容留在技术报告 `report.md`
 - **零第三方依赖**（Python 3.9+ 标准库），两脚本共享 `generate_report.py` 的格式化工具
 
 ## 报告生成流程
@@ -107,35 +107,41 @@ python generate_report.py --env hardware_env_ascend.json \
 
 ## 参数调优指南（generate_tuning_guide.py）
 
-### 数据流与章节
+### 面向客户，只呈现结果
+
+章节严格对应客户关注点（老板要求 5 项）：0 摘要（基本信息 + 结论速览 +
+人工结论）→ 1 硬件信息 → 2 环境信息（含框架）→ 3 参数配置（调优前后对比 +
+锁定启动命令）→ 4 调优前后对比效果（关键指标对比 + 收益结论）→
+5 提升指标与关键性能优化总结 → 附录数据来源。
+
+调优过程内容（收敛旅程回放 / 全量评分表 / REJECT 记录）**不进入客户报告**，
+完整技术细节保留在 `models-optimize-sheel/report.py` 输出的 `report.md`
+（面向技术）。
+
+### 数据流
 
 ```
 models-optimize-sheel/report.py ──→ opt_summary.csv + best_serve_cmd.txt ──┐
-hardware_env.json（params_b / 显存 / TDP）─────────────────────────────────┼─→ tuning_guide_<厂商>.md
-run_matrix 输出（--p2-before / --p2-after，验收对比）─────────────────────┘
+hardware_env.json（硬件/环境/引擎参数）───────────────────────────────────┼─→ tuning_guide_<厂商>.md
+run_matrix 输出（--p2-before / --p2-after，调优前后对比）─────────────────┘
 ```
-
-章节：0 摘要（结论速览 + 人工结论）→ 1 目标与方法 → 2 调优结果（锁定配置 /
-参数说明 / 评分表）→ 3 验收对比（默认 vs 锁定）→ 4 生产部署建议（硬件资源
-配置估算 + 部署清单）→ 5 调优过程问题记录 → 附录。机器部分自动填充，
-结论留 TODO。
 
 ### 参数说明
 
 | 参数 | 必填 | 说明 |
 |---|---|---|
 | `--opt-dir` | 是 | `report.py` 输出目录（含 `opt_summary.csv` + `best_serve_cmd.txt`） |
-| `--env` | 是 | `hardware_env.json` 路径（模型 `params_b` 用于权重估算） |
-| `--p2-before` | 否 | 验收 before：默认配置的 run_matrix 输出目录 |
-| `--p2-after` | 否 | 验收 after：锁定配置的 run_matrix 输出目录 |
+| `--env` | 是 | `hardware_env.json` 路径（硬件/环境信息从该文件取数） |
+| `--p2-before` | 否 | 调优前：默认配置的 run_matrix 输出目录 |
+| `--p2-after` | 否 | 调优后：锁定配置的 run_matrix 输出目录 |
 | `--output` | 否 | 输出路径，缺省 `tuning_guide_<厂商>.md` |
 
-### 硬件资源估算口径（4.1 节，自动）
+### 对比口径（4/5 章，自动）
 
-- 权重体积 = 参数量 × 每参数字节（fp16/bf16=2、fp8/int8=1、int4=0.5）
-- 单卡显存需求 = 锁定配置实测显存峰值 × 单卡容量，与权重估算取大 ×1.25 余量，向上取整到常见容量档
-- 卡数 = 权重体积 ÷ 显存利用率 ÷ 单卡容量；CPU/内存/功耗按经验公式
-- 以上为估算，报告内标注需人工复核
+- 从 `--p2-before` / `--p2-after` 两个 run_matrix 输出目录取数：短/长文本
+  中位吞吐、TTFT/TPOT p99、显存峰值、GPU 平均利用率、OOM 与泄漏组数
+- 变化列自动标注 ✓（改善）并计算百分比；调优前参数默认值取自
+  `hardware_env.json` 的 `engine_args`（未填则输出 TODO 人工补）
 
 ### 代码示例
 
@@ -160,7 +166,7 @@ python generate_tuning_guide.py --opt-dir data\opt-demo \
 ## 附：多厂商对比怎么做
 
 本报告不内置横向对比章节（各厂商测试条件、软件栈版本难以归一）。
-需要对比时，从各厂商报告的 0.2 / 5.4 节与调优指南 3 节手工取数汇总，
+需要对比时，从各厂商报告的 0.2 / 5.4 节与调优指南 4 节手工取数汇总，
 且必须写明对比条件（同模型/量化/上下文/请求分布）与归一化口径
 （按卡数/算力/功耗）。踩坑与兼容性问题记录在基准测试报告附录 A，
 形成厂商问题库。
